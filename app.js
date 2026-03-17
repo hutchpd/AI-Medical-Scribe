@@ -518,7 +518,9 @@
         historySelectedSessionId: null,
         historyEditMode: false,
         historyDetailSearch: '',
+        historySelectedAssetId: 'summary',
         selectedDocumentId: null,
+        documentGenerationRequest: null,
         timerIntervalId: null,
         autoSaveIntervalId: null,
         speechProvider: null,
@@ -544,6 +546,7 @@
         transcriptContainer: $('transcriptContainer'),
         interimContainer: $('interimContainer'),
         interimText: $('interimText'),
+        consultationSummaryCard: $('consultationSummaryCard'),
         consultationSummary: $('consultationSummary'),
         consultationSummaryMeta: $('consultationSummaryMeta'),
         generateSummaryBtn: $('generateSummaryBtn'),
@@ -857,6 +860,8 @@
 
       function renderConsultationSummary() {
         const session = state.activeSession;
+        const canShow = canGenerateDocumentsForSession(session);
+        refs.consultationSummaryCard.classList.toggle('hidden', !canShow);
         refs.consultationSummaryMeta.textContent = getSummaryMetaText(session);
         refs.consultationSummary.innerHTML = buildSummaryPanelHtml(session);
         updateSummaryButton(refs.generateSummaryBtn, session);
@@ -981,24 +986,74 @@
         return timestamp ? (identity + ' • ' + timestamp) : identity;
       }
 
-      function getPreferredDocumentTemplateId() {
-        const templates = getDocumentTemplates();
-        if (!templates.length) return null;
-        const selectedTemplateId = refs.documentsTemplateSelect.value || refs.consultationDocumentType.value;
-        return templates.find((template) => template.id === selectedTemplateId)
-          ? selectedTemplateId
-          : templates[0].id;
+      function isDocumentGenerationBusy() {
+        return Boolean(state.documentGenerationRequest);
+      }
+
+      function getDocumentGenerationBusyMessage() {
+        return 'A document is already being generated. Please wait a moment.';
+      }
+
+      function refreshDocumentGenerationUi() {
+        renderConsultationDocuments();
+        renderDocumentsTab();
+        if (state.currentTab === 'history' && state.historySelectedSessionId) renderHistoryDetail();
+      }
+
+      function updateDocumentGenerateButton(button, enabled, isBusy) {
+        if (!button) return;
+        button.disabled = false;
+        button.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+        button.classList.toggle('is-disabled', !enabled);
+        button.textContent = isBusy ? 'Generating...' : 'Generate Document';
+      }
+
+      function getHistorySessionAssets(session) {
+        if (!session) return [];
+        const assets = [{ id: 'summary', label: 'AI Summary', kind: 'summary' }];
+        const documents = Array.isArray(session.documents)
+          ? session.documents.slice().sort((left, right) => (right.updatedAt || 0) - (left.updatedAt || 0))
+          : [];
+        documents.forEach((documentItem) => {
+          assets.push({
+            id: documentItem.id,
+            label: documentItem.title || documentItem.templateName || 'Document',
+            kind: 'document',
+            documentItem
+          });
+        });
+        return assets;
+      }
+
+      function getSelectedHistoryAsset(session) {
+        const assets = getHistorySessionAssets(session);
+        return assets.find((asset) => asset.id === state.historySelectedAssetId) || assets[0] || null;
+      }
+
+      function setSelectedHistoryAsset(assetId) {
+        state.historySelectedAssetId = assetId || 'summary';
+      }
+
+      function getHistoryAssetMetaText(session, asset) {
+        if (!asset || asset.kind === 'summary') return getSummaryMetaText(session);
+        return (asset.documentItem.templateName || 'Document') + ' • Last updated ' + formatDateTime(asset.documentItem.updatedAt);
+      }
+
+      function buildHistoryAssetHtml(session, asset) {
+        if (!asset || asset.kind === 'summary') return buildSummaryPanelHtml(session);
+        return '<div class="document-preview">' + normaliseGeneratedDocumentMarkup(asset.documentItem.content) + '</div>';
       }
 
       function renderConsultationDocuments() {
         const session = state.activeSession;
         const canShow = canGenerateDocumentsForSession(session);
+        const isBusy = isDocumentGenerationBusy();
         refs.documentGenerationCard.classList.toggle('hidden', !canShow);
         if (!canShow) {
           refs.consultationDocumentType.innerHTML = '';
           refs.consultationDocumentsList.innerHTML = '';
           refs.documentCardMeta.textContent = 'Generate rich text documents from the stopped transcript.';
-          refs.generateDocumentBtn.disabled = true;
+          updateDocumentGenerateButton(refs.generateDocumentBtn, false, isBusy);
           refs.openDocumentsTabBtn.disabled = true;
           return;
         }
@@ -1011,13 +1066,13 @@
         if (!templates.find((template) => template.id === refs.consultationDocumentType.value) && templates.length) {
           refs.consultationDocumentType.value = templates[0].id;
         }
-        refs.generateDocumentBtn.disabled = !hasPromptApiSupport() || !templates.length;
+        updateDocumentGenerateButton(refs.generateDocumentBtn, hasPromptApiSupport() && Boolean(templates.length) && !isBusy, isBusy);
         refs.openDocumentsTabBtn.disabled = false;
 
         const documents = Array.isArray(session.documents) ? session.documents.slice().sort((left, right) => (right.updatedAt || 0) - (left.updatedAt || 0)) : [];
         refs.documentCardMeta.textContent = documents.length
           ? ('Generated ' + String(documents.length) + ' document' + (documents.length === 1 ? '' : 's') + ' for this session.')
-          : 'Generate rich text documents from the stopped transcript.';
+          : (isBusy ? 'Generating a document for this session. Please wait a moment.' : 'Generate rich text documents from the stopped transcript.');
         refs.consultationDocumentsList.innerHTML = documents.length
           ? documents.map((documentItem) => '<button type="button" class="document-card" data-document-id="' + escapeAttribute(documentItem.id) + '"><h4>' + escapeHtml(documentItem.title || documentItem.templateName) + '</h4><p>' + escapeHtml(getDocumentPreviewText(documentItem).slice(0, 150) || 'Rich text document') + '</p><div class="document-card-meta"><span class="plain-chip">' + escapeHtml(formatDateTime(documentItem.updatedAt)) + '</span></div></button>').join('')
           : '<div class="empty-state small">No documents have been generated for this session yet.</div>';
@@ -1026,6 +1081,7 @@
       function renderDocumentsTab() {
         const session = getDocumentTargetSession();
         const canShow = canGenerateDocumentsForSession(session);
+        const isBusy = isDocumentGenerationBusy();
         refs.documentsTabBtn.classList.toggle('hidden', !canShow);
 
         if (state.currentTab === 'documents' && !canShow) {
@@ -1042,7 +1098,7 @@
           refs.documentsTemplateSelect.value = templates[0].id;
         }
 
-        refs.documentsGenerateBtn.disabled = !canShow || !hasPromptApiSupport() || !templates.length;
+        updateDocumentGenerateButton(refs.documentsGenerateBtn, canShow && hasPromptApiSupport() && Boolean(templates.length) && !isBusy, isBusy);
         refs.copyDocumentTextBtn.disabled = true;
         refs.downloadDocumentBtn.disabled = true;
 
@@ -1060,7 +1116,7 @@
 
         const targetLabel = getDocumentTargetLabel(session);
         refs.documentsMetaText.textContent = hasPromptApiSupport()
-          ? ('Target session: ' + targetLabel + '. Generate rich text drafts from this stopped transcript.')
+          ? ('Target session: ' + targetLabel + '. ' + (isBusy ? 'Document generation is in progress. Please wait a moment.' : 'Generate rich text drafts from this stopped transcript.'))
           : 'Document generation requires the Prompt API in this browser.';
 
         const documents = Array.isArray(session.documents) ? session.documents.slice().sort((left, right) => (right.updatedAt || 0) - (left.updatedAt || 0)) : [];
@@ -1090,6 +1146,10 @@
         const session = findSession(sessionId);
         const template = findDocumentTemplate(templateId);
         if (!session || !template) return;
+        if (isDocumentGenerationBusy()) {
+          showToast(getDocumentGenerationBusyMessage(), 'warning', 2600);
+          return;
+        }
         if (!hasPromptApiSupport()) {
           showToast('Document generation requires the Prompt API in this browser.', 'warning', 4200);
           return;
@@ -1099,6 +1159,12 @@
         const transcriptSource = getTranscriptSummarySource(session);
         const requestPrompt = getDocumentTemplatePrompt(template, session, transcriptSource);
         let sessionHandle = null;
+        state.documentGenerationRequest = {
+          sessionId: session.id,
+          templateId: template.id,
+          templateName: template.name
+        };
+        refreshDocumentGenerationUi();
 
         try {
           const availability = await LanguageModel.availability({
@@ -1140,7 +1206,12 @@
 
           refreshedSession.updatedAt = nextTimestamp;
           upsertSession(refreshedSession);
-          setSelectedDocument(((refreshedSession.documents || []).find((documentItem) => documentItem.templateId === template.id) || {}).id || null);
+          const generatedDocument = (refreshedSession.documents || []).find((documentItem) => documentItem.templateId === template.id) || null;
+          setSelectedDocument(generatedDocument ? generatedDocument.id : null);
+          if (state.currentTab === 'history' && state.historySelectedSessionId === refreshedSession.id) {
+            setSelectedHistoryAsset(generatedDocument ? generatedDocument.id : 'summary');
+            renderHistoryDetail();
+          }
           persistSessions();
           renderConsultationDocuments();
           renderDocumentsTab();
@@ -1149,7 +1220,9 @@
         } catch (error) {
           showToast('Document generation failed: ' + normaliseWhitespace(error && error.message ? error.message : String(error || 'Unknown error')), 'error', 4200);
         } finally {
+          state.documentGenerationRequest = null;
           closeTextSession(sessionHandle);
+          refreshDocumentGenerationUi();
         }
       }
 
@@ -1642,23 +1715,27 @@
             await generateSessionSummary(session.id, { force: true });
           });
         }
+        const historyAssetSelect = detailRoot.querySelector('#historySessionAssetSelect');
+        if (historyAssetSelect) {
+          historyAssetSelect.addEventListener('change', () => {
+            setSelectedHistoryAsset(historyAssetSelect.value);
+            renderHistoryDetail();
+          });
+        }
         const generateDocumentButton = detailRoot.querySelector('#historyGenerateDocumentBtn');
         if (generateDocumentButton) {
           generateDocumentButton.addEventListener('click', async () => {
-            const templateId = getPreferredDocumentTemplateId();
+            if (isDocumentGenerationBusy()) {
+              showToast(getDocumentGenerationBusyMessage(), 'warning', 2600);
+              return;
+            }
+            const templateSelect = detailRoot.querySelector('#historyDocumentTemplateSelect');
+            const templateId = templateSelect ? templateSelect.value : '';
             if (!templateId) {
               showToast('Add a document template before generating a document.', 'warning');
               return;
             }
-            await generateSessionDocument(session.id, templateId, { openTab: true });
-          });
-        }
-        const openDocumentsButton = detailRoot.querySelector('#historyOpenDocumentsBtn');
-        if (openDocumentsButton) {
-          openDocumentsButton.addEventListener('click', () => {
-            if (!canGenerateDocumentsForSession(session)) return;
-            renderDocumentsTab();
-            switchTab('documents');
+            await generateSessionDocument(session.id, templateId, { openTab: false });
           });
         }
         detailRoot.querySelectorAll('[data-history-tag]').forEach((button) => {
@@ -1689,6 +1766,7 @@
         }
         const editable = state.historyEditMode;
         const canShowDocuments = canGenerateDocumentsForSession(session);
+        const selectedAsset = getSelectedHistoryAsset(session);
         const detail = refs.historyDetail;
         detail.innerHTML = '<div class="detail-grid">' +
           '<div class="field"><span class="label">Patient</span>' + (editable ? '<input data-history-field="patientName" value="' + escapeAttribute(session.patientName || '') + '" />' : '<div class="static-value">' + escapeHtml(session.patientName || '-') + '</div>') + '</div>' +
@@ -1697,12 +1775,25 @@
           '</div>' +
           '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Metadata</h4><div class="subtle-note">Started ' + escapeHtml(formatDateTime(session.startedAt || session.createdAt)) + ' • Duration ' + escapeHtml(formatDuration(getSessionElapsedMs(session))) + ' • Updated ' + escapeHtml(formatDateTime(session.updatedAt)) + '</div></div><div class="inline-actions"><span class="status-pill ' + escapeAttribute(session.status) + '">' + escapeHtml(titleCaseStatus(session.status)) + '</span>' + (session.archived ? '<span class="archived-badge">Archived</span>' : '') + '</div></div><div class="tag-selector" id="historyTagList"></div></div>' +
           '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Manual notes</h4><div class="subtle-note">Editable when history detail is in edit mode.</div></div></div>' + (editable ? '<textarea id="historyNotesEditor" class="manual-notes" style="min-height:140px;">' + escapeHtml(session.manualNotes || '') + '</textarea>' : '<div class="note-preview">' + escapeHtml(session.manualNotes || 'No manual notes.').replace(/\n/g, '<br>') + '</div>') + '</div>' +
-          '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">AI summary</h4><div class="subtle-note" id="historySummaryMeta"></div></div><div class="inline-actions">' + (canShowDocuments ? '<button class="btn small secondary" type="button" id="historyGenerateDocumentBtn">Generate Document</button><button class="btn small secondary" type="button" id="historyOpenDocumentsBtn">Open Documents</button>' : '') + '<button class="btn small" type="button" id="historyGenerateSummaryBtn">Generate Summary</button></div></div><div class="summary-output" id="historySummaryContainer"></div></div>' +
+          '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Session documents</h4><div class="subtle-note" id="historyDocumentMeta"></div></div><div class="inline-actions"><div class="field" style="margin:0; min-width:220px;"><label class="label" for="historySessionAssetSelect">Show document</label><select id="historySessionAssetSelect"></select></div>' + (canShowDocuments ? '<div class="field" style="margin:0; min-width:220px;"><label class="label" for="historyDocumentTemplateSelect">Generate type</label><select id="historyDocumentTemplateSelect"></select></div><button class="btn small secondary" type="button" id="historyGenerateDocumentBtn">Generate Document</button>' : '') + '<button class="btn small" type="button" id="historyGenerateSummaryBtn">Generate Summary</button></div></div><div class="summary-output" id="historyDocumentContainer"></div></div>' +
           '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Transcript</h4><div class="subtle-note">' + (editable && !state.historyDetailSearch ? 'Stopped transcripts can be corrected inline.' : 'Search to filter transcript segments.') + '</div></div><input id="historyDetailSearch" class="search-input" type="search" placeholder="Search within this transcript..." value="' + escapeAttribute(state.historyDetailSearch || '') + '" /></div><div class="transcript-container history-transcript" id="historyTranscriptContainer"></div></div>';
         renderHistoryTags(detail.querySelector('#historyTagList'), session, editable);
-        detail.querySelector('#historySummaryMeta').textContent = getSummaryMetaText(session);
-        detail.querySelector('#historySummaryContainer').innerHTML = buildSummaryPanelHtml(session);
+        const historyAssetOptions = getHistorySessionAssets(session);
+        const historyAssetSelect = detail.querySelector('#historySessionAssetSelect');
+        historyAssetSelect.innerHTML = historyAssetOptions.map((asset) => '<option value="' + escapeAttribute(asset.id) + '">' + escapeHtml(asset.label) + '</option>').join('');
+        historyAssetSelect.value = selectedAsset ? selectedAsset.id : 'summary';
+        detail.querySelector('#historyDocumentMeta').textContent = getHistoryAssetMetaText(session, selectedAsset);
+        detail.querySelector('#historyDocumentContainer').innerHTML = buildHistoryAssetHtml(session, selectedAsset);
+        const historyDocumentTemplateSelect = detail.querySelector('#historyDocumentTemplateSelect');
+        if (historyDocumentTemplateSelect) {
+          const templates = getDocumentTemplates();
+          historyDocumentTemplateSelect.innerHTML = templates.length
+            ? templates.map((template) => '<option value="' + escapeAttribute(template.id) + '">' + escapeHtml(template.name) + '</option>').join('')
+            : '<option value="">No document templates configured</option>';
+        }
         updateSummaryButton(detail.querySelector('#historyGenerateSummaryBtn'), session);
+        const historyGenerateDocumentBtn = detail.querySelector('#historyGenerateDocumentBtn');
+        if (historyGenerateDocumentBtn) updateDocumentGenerateButton(historyGenerateDocumentBtn, hasPromptApiSupport() && Boolean(getDocumentTemplates().length) && !isDocumentGenerationBusy(), isDocumentGenerationBusy());
         renderTranscriptEntries(detail.querySelector('#historyTranscriptContainer'), session, { searchTerm: state.historyDetailSearch, editable: editable && session.status === 'stopped', emptyMessage: 'This session does not yet contain transcript segments.', onEntryChange: (entryId, newText) => {
           const entry = session.transcriptEntries.find((item) => item.id === entryId);
           if (!entry) return;
@@ -2008,6 +2099,7 @@
       function selectHistorySession(sessionId) {
         state.historySelectedSessionId = sessionId;
         state.historyDetailSearch = '';
+        state.historySelectedAssetId = 'summary';
         renderHistoryList();
         renderHistoryDetail();
       }
@@ -2112,6 +2204,10 @@
           await generateSessionSummary(state.activeSession.id, { force: true });
         });
         refs.generateDocumentBtn.addEventListener('click', async () => {
+          if (isDocumentGenerationBusy()) {
+            showToast(getDocumentGenerationBusyMessage(), 'warning', 2600);
+            return;
+          }
           if (!state.activeSession) return;
           await generateSessionDocument(state.activeSession.id, refs.consultationDocumentType.value, { openTab: false });
         });
@@ -2126,6 +2222,10 @@
           switchTab('documents');
         });
         refs.documentsGenerateBtn.addEventListener('click', async () => {
+          if (isDocumentGenerationBusy()) {
+            showToast(getDocumentGenerationBusyMessage(), 'warning', 2600);
+            return;
+          }
           const session = getDocumentTargetSession();
           if (!session) return;
           await generateSessionDocument(session.id, refs.documentsTemplateSelect.value, { openTab: true });
