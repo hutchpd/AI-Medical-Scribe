@@ -82,6 +82,10 @@
           .slice(0, 48) || 'session';
       }
 
+      function createDefaultSummaryPrompt() {
+        return 'The following is a transcript from a consultation. Summarise it into bullet point doctors notes with the sub headings Subjective, Examination, Assessment and Plan. If a heading has no supporting information, write "- Not stated" under that heading. Keep the wording concise and clinical.';
+      }
+
       function formatClock(timestamp) {
         if (!timestamp) return '-';
         return new Intl.DateTimeFormat([], {
@@ -241,7 +245,8 @@
           theme: 'light',
           dataRetentionDays: 180,
           transcriptFontSize: 16,
-          transcriptLineSpacing: 1.55
+          transcriptLineSpacing: 1.55,
+          summaryPrompt: createDefaultSummaryPrompt()
         };
       }
 
@@ -277,6 +282,7 @@
       function createSession(overrides = {}) {
         const now = Date.now();
         const status = overrides.status || 'stopped';
+        const summaryStatus = ['idle', 'generating', 'ready', 'error'].includes(overrides.summaryStatus) ? overrides.summaryStatus : 'idle';
         return {
           id: overrides.id || uid('session'),
           patientName: overrides.patientName || '',
@@ -294,7 +300,13 @@
           status,
           archived: Boolean(overrides.archived),
           archivedAt: typeof overrides.archivedAt === 'number' ? overrides.archivedAt : null,
-          provider: overrides.provider || 'webkitSpeechRecognition'
+          provider: overrides.provider || 'webkitSpeechRecognition',
+          summary: String(overrides.summary || ''),
+          summaryStatus,
+          summaryUpdatedAt: typeof overrides.summaryUpdatedAt === 'number' ? overrides.summaryUpdatedAt : null,
+          summaryError: String(overrides.summaryError || ''),
+          summaryPrompt: String(overrides.summaryPrompt || ''),
+          summarySignature: String(overrides.summarySignature || '')
         };
       }
 
@@ -337,6 +349,12 @@
         lines.push('Date: ' + formatDateTime(session.startedAt || session.createdAt));
         lines.push('Duration: ' + formatDuration(getSessionElapsedMs(session)));
         lines.push('Tags: ' + ((session.tags || []).join(', ') || '-'));
+        if (normaliseWhitespace(session.summary)) {
+          lines.push('');
+          lines.push('AI Summary');
+          lines.push('----------');
+          lines.push(session.summary);
+        }
         lines.push('');
         lines.push('Transcript');
         lines.push('----------');
@@ -360,6 +378,7 @@
         merged.autoPunctuation = Boolean(merged.autoPunctuation);
         merged.interimResults = Boolean(merged.interimResults);
         merged.saveRawTranscript = Boolean(merged.saveRawTranscript);
+        merged.summaryPrompt = String(merged.summaryPrompt || '').trim() || createDefaultSummaryPrompt();
         return merged;
       }
 
@@ -435,6 +454,8 @@
         autoSaveIntervalId: null,
         speechProvider: null,
         supportsSpeech: 'webkitSpeechRecognition' in window,
+        supportsAiSummary: Boolean(window.ai && typeof window.ai.createTextSession === 'function'),
+        summaryRequestTokens: {},
         lastPersistedAt: null
       };
 
@@ -453,6 +474,9 @@
         transcriptContainer: $('transcriptContainer'),
         interimContainer: $('interimContainer'),
         interimText: $('interimText'),
+        consultationSummary: $('consultationSummary'),
+        consultationSummaryMeta: $('consultationSummaryMeta'),
+        generateSummaryBtn: $('generateSummaryBtn'),
         transcriptSearch: $('transcriptSearch'),
         copyTranscriptBtn: $('copyTranscriptBtn'),
         exportTranscriptBtn: $('exportTranscriptBtn'),
@@ -489,6 +513,8 @@
         settingTranscriptFontSizeValue: $('settingTranscriptFontSizeValue'),
         settingLineSpacing: $('settingLineSpacing'),
         settingLineSpacingValue: $('settingLineSpacingValue'),
+        settingSummaryPrompt: $('settingSummaryPrompt'),
+        settingSummaryAvailability: $('settingSummaryAvailability'),
         customOrgName: $('customOrgName'),
         customBrandColor: $('customBrandColor'),
         customBrandColorValue: $('customBrandColorValue'),
@@ -609,6 +635,215 @@
       }
 
       function findSession(sessionId) { return state.sessions.find((session) => session.id === sessionId) || null; }
+
+      function getSummaryPromptValue() {
+        return String(state.settings.summaryPrompt || '').trim() || createDefaultSummaryPrompt();
+      }
+
+      function getSummaryHeadingLabel(heading) {
+        const labels = {
+          subjective: 'Subjective',
+          examination: 'Examination',
+          assessment: 'Assessment',
+          plan: 'Plan'
+        };
+        return labels[String(heading || '').toLowerCase()] || null;
+      }
+
+      function getTranscriptSummarySource(session) {
+        if (!session || !Array.isArray(session.transcriptEntries)) return '';
+        return session.transcriptEntries
+          .map((entry) => entry.isImportantMarker ? '[Important moment]' : normaliseWhitespace(entry.text || ''))
+          .filter(Boolean)
+          .join('\n');
+      }
+
+      function hasSummarisableTranscript(session) {
+        return Boolean(normaliseWhitespace(getTranscriptSummarySource(session)));
+      }
+
+      function isSessionSummaryStale(session) {
+        if (!session || !normaliseWhitespace(session.summary)) return false;
+        return (session.summarySignature || '') !== getTranscriptSummarySource(session) || (session.summaryPrompt || '') !== getSummaryPromptValue();
+      }
+
+      function getEffectiveSummaryStatus(session) {
+        if (!session) return 'idle';
+        if (session.summaryStatus === 'generating') return 'generating';
+        if (session.summaryStatus === 'error') return 'error';
+        if (isSessionSummaryStale(session)) return 'stale';
+        if (normaliseWhitespace(session.summary)) return 'ready';
+        return 'idle';
+      }
+
+      function closeTextSession(textSession) {
+        if (!textSession) return;
+        try {
+          if (typeof textSession.destroy === 'function') textSession.destroy();
+          else if (typeof textSession.close === 'function') textSession.close();
+          else if (typeof textSession.end === 'function') textSession.end();
+        } catch (_) {}
+      }
+
+      function parseStructuredSummary(summaryText) {
+        const headings = ['Subjective', 'Examination', 'Assessment', 'Plan'];
+        const sections = headings.reduce((accumulator, heading) => {
+          accumulator[heading] = [];
+          return accumulator;
+        }, {});
+        let currentHeading = null;
+        let foundHeading = false;
+
+        String(summaryText || '')
+          .replace(/\r/g, '')
+          .split('\n')
+          .forEach((line) => {
+            const trimmed = line.trim();
+            if (!trimmed) return;
+            const cleaned = trimmed
+              .replace(/^#+\s*/, '')
+              .replace(/^\*\*(.*?)\*\*$/, '$1')
+              .replace(/^__(.*?)__$/, '$1');
+            const headingMatch = cleaned.match(/^(?:[-*•]\s*)?(Subjective|Examination|Assessment|Plan)\s*:?\s*(.*)$/i);
+            if (headingMatch) {
+              currentHeading = getSummaryHeadingLabel(headingMatch[1]);
+              foundHeading = Boolean(currentHeading);
+              if (currentHeading && headingMatch[2]) sections[currentHeading].push(headingMatch[2].trim());
+              return;
+            }
+            const bulletMatch = cleaned.match(/^[-*•]\s+(.+)$/);
+            if (bulletMatch && currentHeading) {
+              sections[currentHeading].push(bulletMatch[1].trim());
+              return;
+            }
+            if (currentHeading) sections[currentHeading].push(cleaned);
+          });
+
+        return foundHeading ? sections : null;
+      }
+
+      function buildSummaryMarkup(summaryText) {
+        const sections = parseStructuredSummary(summaryText);
+        if (!sections) return '<div class="summary-plaintext">' + escapeHtml(summaryText || '').replace(/\n/g, '<br>') + '</div>';
+        return ['Subjective', 'Examination', 'Assessment', 'Plan'].map((heading) => {
+          const items = sections[heading] && sections[heading].length ? sections[heading] : ['Not stated'];
+          return '<section class="summary-section"><h4>' + heading + '</h4><ul class="summary-list">' + items.map((item) => '<li>' + escapeHtml(item) + '</li>').join('') + '</ul></section>';
+        }).join('');
+      }
+
+      function getSummaryMetaText(session) {
+        if (!session) return 'Generated after stopping the session using on-device AI.';
+        const status = getEffectiveSummaryStatus(session);
+        if (!state.supportsAiSummary) return 'On-device AI summarisation is unavailable in this browser.';
+        if (!hasSummarisableTranscript(session)) return 'Stop a consultation with transcript content to generate a summary.';
+        if (status === 'generating') return 'Generating summary with Gemini Nano in the browser.';
+        if (status === 'error') return session.summaryError || 'Summary generation failed.';
+        if (status === 'stale') return 'Transcript or prompt changed since the last summary was generated.';
+        if (session.summaryUpdatedAt) return 'Generated ' + formatDateTime(session.summaryUpdatedAt) + ' using the current saved prompt.';
+        return 'Generated after stopping the session using on-device AI.';
+      }
+
+      function buildSummaryPanelHtml(session) {
+        if (!session) return '<div class="empty-state small">Start or open a session to generate an AI summary from its transcript.</div>';
+        if (!state.supportsAiSummary) return '<div class="empty-state small">This browser does not currently expose Gemini Nano through window.ai, so summaries cannot be generated here.</div>';
+        if (!hasSummarisableTranscript(session)) return '<div class="empty-state small">No transcript content is available yet. Stop a consultation after dictation to generate the summary.</div>';
+
+        const status = getEffectiveSummaryStatus(session);
+        if (status === 'generating') return '<div class="summary-status generating">Generating summary with on-device AI. This usually completes a few moments after you stop the session.</div>';
+        if (status === 'error') return '<div class="summary-status error">' + escapeHtml(session.summaryError || 'Summary generation failed. Try again.') + '</div>';
+        if (!normaliseWhitespace(session.summary)) return '<div class="empty-state small">The summary will be generated automatically when the session stops. You can also run it manually.</div>';
+
+        return '<div class="summary-grid">' + buildSummaryMarkup(session.summary) + '</div>';
+      }
+
+      function updateSummaryButton(button, session) {
+        if (!button) return;
+        const status = getEffectiveSummaryStatus(session);
+        button.disabled = !session || !state.supportsAiSummary || !hasSummarisableTranscript(session) || status === 'generating';
+        button.textContent = normaliseWhitespace(session ? session.summary : '') ? 'Regenerate Summary' : 'Generate Summary';
+      }
+
+      function renderConsultationSummary() {
+        const session = state.activeSession;
+        refs.consultationSummaryMeta.textContent = getSummaryMetaText(session);
+        refs.consultationSummary.innerHTML = buildSummaryPanelHtml(session);
+        updateSummaryButton(refs.generateSummaryBtn, session);
+      }
+
+      async function generateSessionSummary(sessionId, options = {}) {
+        const session = findSession(sessionId);
+        if (!session) return;
+
+        const promptTemplate = getSummaryPromptValue();
+        const transcriptSource = getTranscriptSummarySource(session);
+        const status = getEffectiveSummaryStatus(session);
+        const force = Boolean(options.force);
+        const showFeedback = options.showFeedback !== false;
+
+        if (!state.supportsAiSummary) {
+          if (showFeedback) showToast('On-device AI summarisation is not available in this browser.', 'warning', 4200);
+          renderConsultationSummary();
+          if (state.currentTab === 'history' && state.historySelectedSessionId === session.id) renderHistoryDetail();
+          return;
+        }
+        if (!normaliseWhitespace(transcriptSource)) return;
+        if (!force && status === 'ready') return;
+        if (!force && status === 'generating') return;
+
+        const requestToken = uid('summary');
+        state.summaryRequestTokens[session.id] = requestToken;
+        session.summaryStatus = 'generating';
+        session.summaryError = '';
+        session.updatedAt = Date.now();
+        upsertSession(session);
+        persistSessions();
+        if (state.activeSession && state.activeSession.id === session.id) renderConsultationSummary();
+        if (state.currentTab === 'history' && state.historySelectedSessionId === session.id) renderHistoryDetail();
+
+        const finalPrompt = promptTemplate + '\n\nConsultation transcript:\n' + transcriptSource;
+        let textSession = null;
+
+        try {
+          textSession = await window.ai.createTextSession();
+          const result = await textSession.prompt(finalPrompt);
+          if (state.summaryRequestTokens[session.id] !== requestToken) return;
+
+          const refreshedSession = findSession(session.id);
+          if (!refreshedSession) return;
+
+          const summaryText = String(result || '').trim();
+          if (!summaryText) throw new Error('The browser returned an empty summary.');
+
+          refreshedSession.summary = summaryText;
+          refreshedSession.summaryStatus = 'ready';
+          refreshedSession.summaryUpdatedAt = Date.now();
+          refreshedSession.summaryError = '';
+          refreshedSession.summaryPrompt = promptTemplate;
+          refreshedSession.summarySignature = transcriptSource;
+          refreshedSession.updatedAt = Date.now();
+          upsertSession(refreshedSession);
+          persistSessions();
+          if (state.activeSession && state.activeSession.id === refreshedSession.id) renderConsultationSummary();
+          if (state.currentTab === 'history' && state.historySelectedSessionId === refreshedSession.id) renderHistoryDetail();
+          if (showFeedback) showToast('Summary generated.', 'success', 2200);
+        } catch (error) {
+          if (state.summaryRequestTokens[session.id] !== requestToken) return;
+          const refreshedSession = findSession(session.id);
+          if (!refreshedSession) return;
+          const detail = normaliseWhitespace(error && error.message ? error.message : String(error || ''));
+          refreshedSession.summaryStatus = 'error';
+          refreshedSession.summaryError = detail ? ('Gemini Nano summary generation failed: ' + detail) : 'Gemini Nano summary generation failed in this browser.';
+          refreshedSession.updatedAt = Date.now();
+          upsertSession(refreshedSession);
+          persistSessions();
+          if (state.activeSession && state.activeSession.id === refreshedSession.id) renderConsultationSummary();
+          if (state.currentTab === 'history' && state.historySelectedSessionId === refreshedSession.id) renderHistoryDetail();
+          if (showFeedback) showToast('Summary generation failed.', 'error', 4200);
+        } finally {
+          closeTextSession(textSession);
+          if (state.summaryRequestTokens[session.id] === requestToken) delete state.summaryRequestTokens[session.id];
+        }
+      }
 
       function getSelectedConsultationTags() {
         return Array.from(refs.tagSelector.querySelectorAll('.tag-chip.selected')).map((chip) => chip.dataset.tag);
@@ -791,7 +1026,11 @@
         session.updatedAt = Date.now();
         upsertSession(session);
         if (persistImmediately) persistSessionsDebounced();
-        if (state.activeSession && state.activeSession.id === session.id) renderConsultationChrome();
+        if (state.activeSession && state.activeSession.id === session.id) {
+          renderConsultationChrome();
+          renderConsultationSummary();
+        }
+        if (state.currentTab === 'history' && state.historySelectedSessionId === session.id) renderHistoryDetail();
       }
 
       function renderTranscriptEntries(container, session, options = {}) {
@@ -857,6 +1096,7 @@
         renderMacroBar();
         renderConsultationTagSelector();
         renderConsultationChrome();
+        renderConsultationSummary();
         renderConsultationTranscript();
       }
 
@@ -941,6 +1181,12 @@
             renderHistoryDetail();
           });
         }
+        const summaryButton = detailRoot.querySelector('#historyGenerateSummaryBtn');
+        if (summaryButton) {
+          summaryButton.addEventListener('click', async () => {
+            await generateSessionSummary(session.id, { force: true });
+          });
+        }
         detailRoot.querySelectorAll('[data-history-tag]').forEach((button) => {
           button.addEventListener('click', () => {
             const tag = button.dataset.historyTag;
@@ -976,8 +1222,12 @@
           '</div>' +
           '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Metadata</h4><div class="subtle-note">Started ' + escapeHtml(formatDateTime(session.startedAt || session.createdAt)) + ' • Duration ' + escapeHtml(formatDuration(getSessionElapsedMs(session))) + ' • Updated ' + escapeHtml(formatDateTime(session.updatedAt)) + '</div></div><div class="inline-actions"><span class="status-pill ' + escapeAttribute(session.status) + '">' + escapeHtml(titleCaseStatus(session.status)) + '</span>' + (session.archived ? '<span class="archived-badge">Archived</span>' : '') + '</div></div><div class="tag-selector" id="historyTagList"></div></div>' +
           '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Manual notes</h4><div class="subtle-note">Editable when history detail is in edit mode.</div></div></div>' + (editable ? '<textarea id="historyNotesEditor" class="manual-notes" style="min-height:140px;">' + escapeHtml(session.manualNotes || '') + '</textarea>' : '<div class="note-preview">' + escapeHtml(session.manualNotes || 'No manual notes.').replace(/\n/g, '<br>') + '</div>') + '</div>' +
+          '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">AI summary</h4><div class="subtle-note" id="historySummaryMeta"></div></div><button class="btn small" type="button" id="historyGenerateSummaryBtn">Generate Summary</button></div><div class="summary-output" id="historySummaryContainer"></div></div>' +
           '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Transcript</h4><div class="subtle-note">' + (editable && !state.historyDetailSearch ? 'Stopped transcripts can be corrected inline.' : 'Search to filter transcript segments.') + '</div></div><input id="historyDetailSearch" class="search-input" type="search" placeholder="Search within this transcript..." value="' + escapeAttribute(state.historyDetailSearch || '') + '" /></div><div class="transcript-container history-transcript" id="historyTranscriptContainer"></div></div>';
         renderHistoryTags(detail.querySelector('#historyTagList'), session, editable);
+        detail.querySelector('#historySummaryMeta').textContent = getSummaryMetaText(session);
+        detail.querySelector('#historySummaryContainer').innerHTML = buildSummaryPanelHtml(session);
+        updateSummaryButton(detail.querySelector('#historyGenerateSummaryBtn'), session);
         renderTranscriptEntries(detail.querySelector('#historyTranscriptContainer'), session, { searchTerm: state.historyDetailSearch, editable: editable && session.status === 'stopped', emptyMessage: 'This session does not yet contain transcript segments.', onEntryChange: (entryId, newText) => {
           const entry = session.transcriptEntries.find((item) => item.id === entryId);
           if (!entry) return;
@@ -987,6 +1237,7 @@
           upsertSession(session);
           syncConsultationViewForSession(session);
           persistSessionsDebounced();
+          renderHistoryDetail();
         } });
         attachHistoryDetailListeners(session, detail);
       }
@@ -1023,6 +1274,10 @@
         refs.settingTranscriptFontSizeValue.textContent = state.settings.transcriptFontSize + 'px';
         refs.settingLineSpacing.value = String(state.settings.transcriptLineSpacing);
         refs.settingLineSpacingValue.textContent = Number(state.settings.transcriptLineSpacing).toFixed(2);
+        refs.settingSummaryPrompt.value = getSummaryPromptValue();
+        refs.settingSummaryAvailability.textContent = state.supportsAiSummary
+          ? 'Gemini Nano is available through the browser. Summaries run on-device with no API key.'
+          : 'Gemini Nano is not currently exposed through window.ai in this browser, so summary generation is unavailable here.';
       }
 
       function renderMacroEditor() {
@@ -1065,6 +1320,7 @@
         applyThemeAndBranding();
         renderSettingsForm();
         renderConsultationChrome();
+        renderConsultationSummary();
         renderConsultationTranscript();
         renderHistoryDetail();
         resetAutoSaveInterval();
@@ -1142,6 +1398,7 @@
         session.updatedAt = Date.now();
         upsertSession(session);
         if (state.activeSession && state.activeSession.id === session.id) {
+          renderConsultationSummary();
           renderConsultationTranscript();
           renderConsultationChrome();
           scrollTranscriptToBottom(refs.transcriptContainer);
@@ -1212,6 +1469,7 @@
         renderConsultation();
         if (state.speechProvider) state.speechProvider.stop();
         persistSessions();
+        generateSessionSummary(state.activeSession.id, { force: false, showFeedback: false });
       }
 
       function markImportantMoment() {
@@ -1221,6 +1479,7 @@
         state.activeSession.transcriptEntries.push(createTranscriptEntry({ text: '', timestamp: now, isImportantMarker: true, confidence: null, flags: { isImportantMarker: true } }));
         state.activeSession.updatedAt = now;
         upsertSession(state.activeSession);
+        renderConsultationSummary();
         renderConsultationTranscript();
         renderConsultationChrome();
         scrollTranscriptToBottom(refs.transcriptContainer);
@@ -1355,6 +1614,10 @@
         refs.stopBtn.addEventListener('click', stopListening);
         refs.markImportantBtn.addEventListener('click', markImportantMoment);
         refs.saveSessionBtn.addEventListener('click', () => saveSessionImmediately(true));
+        refs.generateSummaryBtn.addEventListener('click', async () => {
+          if (!state.activeSession) return;
+          await generateSessionSummary(state.activeSession.id, { force: true });
+        });
         refs.copyTranscriptBtn.addEventListener('click', copyCurrentTranscript);
         refs.exportTranscriptBtn.addEventListener('click', exportCurrentTranscript);
         refs.macroBar.addEventListener('click', (event) => {
@@ -1416,6 +1679,10 @@
         refs.settingDataRetentionDays.addEventListener('input', () => { state.settings.dataRetentionDays = Math.max(0, Number(refs.settingDataRetentionDays.value) || 0); saveSettings(); renderSettingsForm(); handleRetentionUpdate(); });
         refs.settingTranscriptFontSize.addEventListener('input', () => { state.settings.transcriptFontSize = clamp(Number(refs.settingTranscriptFontSize.value) || 16, 14, 24); applySettingsChange(); });
         refs.settingLineSpacing.addEventListener('input', () => { state.settings.transcriptLineSpacing = clamp(Number(refs.settingLineSpacing.value) || 1.55, 1.2, 2); applySettingsChange(); });
+        refs.settingSummaryPrompt.addEventListener('input', debounce(() => {
+          state.settings.summaryPrompt = String(refs.settingSummaryPrompt.value || '').trim() || createDefaultSummaryPrompt();
+          saveSettings();
+        }, 180));
         refs.customOrgName.addEventListener('input', () => { state.customisation.organisationName = normaliseWhitespace(refs.customOrgName.value) || 'Organisation'; saveCustomisation(); applyThemeAndBranding(); renderConsultation(); });
         refs.customBrandColor.addEventListener('input', () => { state.customisation.brandingColor = refs.customBrandColor.value; saveCustomisation(); applyThemeAndBranding(); renderConsultation(); });
         refs.customDefaultConsultationType.addEventListener('input', () => {

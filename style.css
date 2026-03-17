@@ -408,6 +408,10 @@
       margin-top: 14px;
     }
 
+    .summary-card {
+      margin-bottom: 18px;
+    }
+
     .btn {
       display: inline-flex;
       align-items: center;
@@ -758,6 +762,70 @@
       line-height: 1.55;
     }
 
+    .summary-output {
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      background:
+        linear-gradient(180deg, rgba(var(--accent-rgb), 0.04), transparent 55%),
+        var(--panel);
+      padding: 16px;
+      min-height: 140px;
+    }
+
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .summary-section {
+      padding: 14px;
+      border-radius: 18px;
+      border: 1px solid rgba(var(--accent-rgb), 0.10);
+      background: var(--card);
+      box-shadow: 0 8px 18px rgba(16, 28, 44, 0.05);
+    }
+
+    .summary-section h4 {
+      margin: 0 0 10px;
+      font-size: 0.98rem;
+      letter-spacing: -0.02em;
+    }
+
+    .summary-list {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--text);
+      line-height: 1.55;
+    }
+
+    .summary-list li + li {
+      margin-top: 8px;
+    }
+
+    .summary-plaintext {
+      white-space: pre-wrap;
+      line-height: 1.6;
+    }
+
+    .summary-status {
+      border-radius: 16px;
+      padding: 14px 16px;
+      border: 1px solid var(--border);
+      line-height: 1.55;
+      background: var(--card);
+    }
+
+    .summary-status.generating {
+      border-color: rgba(var(--accent-rgb), 0.18);
+      background: rgba(var(--accent-rgb), 0.06);
+    }
+
+    .summary-status.error {
+      border-color: rgba(var(--danger-rgb), 0.20);
+      background: rgba(var(--danger-rgb), 0.08);
+    }
+
     .toggle-wrap {
       display: inline-flex;
       align-items: center;
@@ -949,6 +1017,7 @@
     @media (max-width: 1180px) {
       .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .consultation-grid, .history-grid, .settings-grid, .custom-grid { grid-template-columns: 1fr; }
+      .summary-grid { grid-template-columns: 1fr; }
       .topbar, .section-header { align-items: flex-start; flex-direction: column; }
     }
 

@@ -12,7 +12,7 @@
       <div class="brand">
         <div class="brand-mark" aria-hidden="true"></div>
         <div class="brand-copy">
-          <p class="eyebrow" id="orgDisplay">Northbridge Clinic</p>
+          <p class="eyebrow" id="orgDisplay">Findon Software</p>
           <h1>AI Medical Scribe</h1>
         </div>
       </div>
@@ -58,7 +58,7 @@
           </div>
           <div class="field">
             <span class="label">Organisation</span>
-            <div class="readonly-chip" id="consultationOrgName">Northbridge Clinic</div>
+            <div class="readonly-chip" id="consultationOrgName">Findon Software</div>
           </div>
         </div>
 
@@ -73,6 +73,19 @@
             <button class="btn" id="markImportantBtn" type="button">Mark Important Moment</button>
             <button class="btn ghost" id="saveSessionBtn" type="button">Save Session</button>
           </div>
+        </div>
+
+        <div class="card summary-card">
+          <div class="card-header">
+            <div>
+              <h3>AI Summary</h3>
+              <div class="subtle-note" id="consultationSummaryMeta">Generated after stopping the session using on-device AI.</div>
+            </div>
+            <div class="inline-actions">
+              <button class="btn small" id="generateSummaryBtn" type="button">Generate Summary</button>
+            </div>
+          </div>
+          <div class="summary-output" id="consultationSummary"></div>
         </div>
 
         <div class="consultation-grid">
@@ -302,6 +315,17 @@
               </div>
             </div>
           </div>
+
+          <div class="card settings-card">
+            <div class="setting-group">
+              <h3>On-device AI summary</h3>
+              <div class="setting-row">
+                <label class="label" for="settingSummaryPrompt">Summary prompt</label>
+                <textarea id="settingSummaryPrompt" class="textarea" rows="7" placeholder="Enter the default consultation summary prompt..."></textarea>
+                <div class="subtle-note" id="settingSummaryAvailability">Uses Gemini Nano through the browser when available. No API key is required.</div>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -339,7 +363,7 @@
             </div>
             <div class="brand-preview" id="brandPreview">
               <div class="eyebrow">Preview</div>
-              <h3 style="margin: 6px 0 8px; display: flex; align-items: center;"><span class="brand-swatch"></span><span id="brandPreviewTitle">Northbridge Clinic</span></h3>
+              <h3 style="margin: 6px 0 8px; display: flex; align-items: center;"><span class="brand-swatch"></span><span id="brandPreviewTitle">Findon Software</span></h3>
               <div class="subtle-note">The accent colour is used for controls, badges, highlights, and transcript markers.</div>
             </div>
           </div>
