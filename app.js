@@ -769,8 +769,16 @@
         return 'idle';
       }
 
+      function hasPromptApiSupport() {
+        return Boolean('LanguageModel' in self && state.supportsAiSummary);
+      }
+
+      function hasSummarizerSupport() {
+        return Boolean('Summarizer' in self && state.supportsSummarizer);
+      }
+
       function hasAiSummarySupport() {
-        return Boolean(state.supportsAiSummary || state.supportsSummarizer);
+        return Boolean(hasPromptApiSupport() || hasSummarizerSupport());
       }
 
       function closeTextSession(session) {
@@ -778,6 +786,266 @@
         try {
           if (typeof session.destroy === 'function') session.destroy();
         } catch (_) {}
+      }
+
+      function getPromptApiOptions() {
+        return {
+          expectedOutputLanguage: 'en',
+          expectedOutputs: [{ type: 'text', languages: ['en'] }]
+        };
+      }
+
+      function createEmptySoapSections() {
+        return ['Subjective', 'Examination', 'Assessment', 'Plan'].reduce((accumulator, heading) => {
+          accumulator[heading] = [];
+          return accumulator;
+        }, {});
+      }
+
+      function buildSoapSummaryFromSections(sections) {
+        return ['Subjective', 'Examination', 'Assessment', 'Plan'].map((heading) => {
+          const seen = new Set();
+          const items = (Array.isArray(sections && sections[heading]) ? sections[heading] : [])
+            .map((item) => normaliseWhitespace(String(item || '').replace(/^[-*•]\s*/, '')))
+            .filter((item) => item && item.toLowerCase() !== 'not stated')
+            .filter((item) => {
+              const key = item.toLowerCase();
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            });
+          const finalItems = items.length ? items : ['Not stated'];
+          return heading + '\n' + finalItems.map((item) => '- ' + item).join('\n');
+        }).join('\n\n');
+      }
+
+      function extractSoapSections(summaryText) {
+        const parsedSections = parseStructuredSummary(summaryText);
+        if (parsedSections) return parsedSections;
+
+        const sections = createEmptySoapSections();
+        String(summaryText || '')
+          .replace(/\r/g, '')
+          .split('\n')
+          .map((line) => normaliseWhitespace(line.replace(/^[-*•]\s*/, '')))
+          .filter(Boolean)
+          .forEach((line) => {
+            if (/(?:\bexam\b|\bexamination\b|\bobserved\b|\bvitals?\b|\bbp\b|\bpulse\b|\btemp(?:erature)?\b|\bo\/e\b)/i.test(line)) {
+              sections.Examination.push(line);
+              return;
+            }
+            if (/(?:\bassessment\b|\bdiagnos(?:is|es)\b|\bimpression\b|\blikely\b|\bconsistent with\b)/i.test(line)) {
+              sections.Assessment.push(line);
+              return;
+            }
+            if (/(?:\bplan\b|\bfollow-up\b|\bfollow up\b|\breview\b|\bmonitor\b|\bprescrib(?:e|ed|ing)\b|\bstart\b|\bcontinue\b|\bcease\b|\brefer(?:ral|red)?\b|\binvestigations?\b|\breturn\b|\bseek urgent\b|\bsafety-net\b)/i.test(line)) {
+              sections.Plan.push(line);
+              return;
+            }
+            if (/(?:\bsymptom\b|\bhistory\b|\breports?\b|\bcomplains?\b|\bdenies\b|\bpain\b|\bcough\b|\bfever\b|\bnausea\b|\bvomit(?:ing)?\b)/i.test(line)) {
+              sections.Subjective.push(line);
+              return;
+            }
+            sections.Subjective.push(line);
+          });
+
+        return sections;
+      }
+
+      function normalizeSoapSummary(summaryText) {
+        return buildSoapSummaryFromSections(extractSoapSections(summaryText));
+      }
+
+      function estimateTranscriptTooLarge(text, maxChars = 6000) {
+        return String(text || '').length > maxChars;
+      }
+
+      function splitTranscriptIntoChunks(transcriptSource, maxChunkChars = 6000, overlapChars = 500) {
+        const source = String(transcriptSource || '').replace(/\r/g, '').trim();
+        if (!source) return [];
+        if (!estimateTranscriptTooLarge(source, maxChunkChars)) return [source];
+
+        const chunks = [];
+        const safeOverlap = clamp(Number(overlapChars) || 0, 0, Math.max(0, Math.floor(maxChunkChars / 3)));
+        let start = 0;
+
+        while (start < source.length) {
+          let end = Math.min(source.length, start + maxChunkChars);
+          if (end < source.length) {
+            const minimumBoundary = start + Math.max(1200, Math.floor(maxChunkChars * 0.6));
+            const boundaries = [source.lastIndexOf('\n\n', end), source.lastIndexOf('\n', end), source.lastIndexOf('. ', end), source.lastIndexOf(' ', end)];
+            const preferredBoundary = boundaries.find((index) => index >= minimumBoundary);
+            if (preferredBoundary >= minimumBoundary) {
+              end = preferredBoundary;
+              if (source.slice(end, end + 2) === '\n\n') end += 2;
+              else if (source.charAt(end) === '\n' || source.charAt(end) === ' ') end += 1;
+              else if (source.slice(end, end + 2) === '. ') end += 1;
+            } else {
+              while (end > minimumBoundary && /\S/.test(source.charAt(end - 1)) && /\S/.test(source.charAt(end))) end -= 1;
+            }
+          }
+
+          const chunk = source.slice(start, end).trim();
+          if (chunk) chunks.push(chunk);
+          if (end >= source.length) break;
+
+          start = Math.max(0, end - safeOverlap);
+          while (start > 0 && /\S/.test(source.charAt(start - 1)) && /\S/.test(source.charAt(start))) start -= 1;
+          if (chunk && start >= end) start = end;
+        }
+
+        return chunks.length ? chunks : [source];
+      }
+
+      function buildSummaryPrompt(promptTemplate, transcriptSource) {
+        return promptTemplate + '\n\nConsultation transcript:\n' + transcriptSource;
+      }
+
+      function buildChunkSummaryPrompt(promptTemplate, transcriptChunk, chunkIndex, chunkCount) {
+        return [
+          promptTemplate,
+          '',
+          'This is chunk ' + String(chunkIndex + 1) + ' of ' + String(chunkCount) + ' from one longer consultation transcript.',
+          'Produce a concise partial SOAP summary for this chunk only.',
+          'Use the headings Subjective, Examination, Assessment and Plan.',
+          'If a heading has no supporting information in this chunk, write "- Not stated" under that heading.',
+          'Do not invent facts. Keep clinically relevant negatives when present.',
+          '',
+          'Consultation transcript chunk:',
+          transcriptChunk
+        ].join('\n');
+      }
+
+      function buildSummaryMergePrompt(promptTemplate, partialSummaries) {
+        return [
+          promptTemplate,
+          '',
+          'The following are partial SOAP summaries from consecutive transcript chunks.',
+          'Merge them into one concise clinical SOAP summary.',
+          'Deduplicate repeated facts, preserve medically relevant details, and do not invent facts.',
+          'Use the headings Subjective, Examination, Assessment and Plan.',
+          'If a heading has no information, write "- Not stated".',
+          '',
+          partialSummaries.map((summary, index) => 'Chunk summary ' + String(index + 1) + ':\n' + String(summary || '').trim()).join('\n\n')
+        ].join('\n');
+      }
+
+      async function promptWithLanguageModel(promptText) {
+        let sessionHandle = null;
+        try {
+          sessionHandle = await LanguageModel.create(getPromptApiOptions());
+          const result = await sessionHandle.prompt(promptText);
+          const summaryText = String(result || '').trim();
+          if (!summaryText) throw new Error('The browser returned an empty summary.');
+          return summaryText;
+        } finally {
+          closeTextSession(sessionHandle);
+        }
+      }
+
+      async function summarizeWithPromptApi(text, promptTemplate) {
+        return promptWithLanguageModel(buildSummaryPrompt(promptTemplate, text));
+      }
+
+      async function summarizeWithSummarizer(text) {
+        let sessionHandle = null;
+        try {
+          sessionHandle = await Summarizer.create({
+            type: 'key-points',
+            format: 'markdown',
+            length: 'medium'
+          });
+          const result = await sessionHandle.summarize(text);
+          const summaryText = String(result || '').trim();
+          if (!summaryText) throw new Error('The browser returned an empty summary.');
+          return summaryText;
+        } finally {
+          closeTextSession(sessionHandle);
+        }
+      }
+
+      async function summarizeChunkedWithPromptApi(transcriptSource, promptTemplate) {
+        const chunks = splitTranscriptIntoChunks(transcriptSource);
+        if (!chunks.length) return '';
+        if (chunks.length === 1) return normalizeSoapSummary(await summarizeWithPromptApi(chunks[0], promptTemplate));
+
+        const partialSummaries = [];
+        for (let index = 0; index < chunks.length; index += 1) {
+          partialSummaries.push(await promptWithLanguageModel(buildChunkSummaryPrompt(promptTemplate, chunks[index], index, chunks.length)));
+        }
+
+        const mergedSummary = await promptWithLanguageModel(buildSummaryMergePrompt(promptTemplate, partialSummaries));
+        return normalizeSoapSummary(mergedSummary);
+      }
+
+      async function summarizeChunkedWithSummarizer(transcriptSource, promptTemplate) {
+        const chunks = splitTranscriptIntoChunks(transcriptSource);
+        if (!chunks.length) return '';
+        if (chunks.length === 1) return normalizeSoapSummary(await summarizeWithSummarizer(chunks[0]));
+
+        const partialSummaries = [];
+        for (let index = 0; index < chunks.length; index += 1) {
+          partialSummaries.push(await summarizeWithSummarizer(chunks[index]));
+        }
+
+        return normalizeSoapSummary(partialSummaries.join('\n\n'));
+      }
+
+      async function buildChunkedSummary(session, promptTemplate) {
+        const transcriptSource = getTranscriptSummarySource(session);
+        if (!normaliseWhitespace(transcriptSource)) return '';
+
+        if (hasPromptApiSupport()) {
+          let availability = 'unavailable';
+          try {
+            availability = await LanguageModel.availability(getPromptApiOptions());
+          } catch (error) {
+            availability = 'availability-check-failed';
+          }
+          if (availability === 'available') return summarizeChunkedWithPromptApi(transcriptSource, promptTemplate);
+          if (!hasSummarizerSupport()) throw new Error('Language model is not available: ' + availability);
+        }
+
+        if (hasSummarizerSupport()) return summarizeChunkedWithSummarizer(transcriptSource, promptTemplate);
+        throw new Error('On-device AI summarisation is unavailable in this browser.');
+      }
+
+      function renderSummaryViewsForSession(sessionId) {
+        if (state.activeSession && state.activeSession.id === sessionId) renderConsultationSummary();
+        if (state.currentTab === 'history' && state.historySelectedSessionId === sessionId) renderHistoryDetail();
+      }
+
+      function applyGeneratedSummary(sessionId, requestToken, summaryText, promptTemplate, transcriptSource) {
+        if (state.summaryRequestTokens[sessionId] !== requestToken) return null;
+        const refreshedSession = findSession(sessionId);
+        if (!refreshedSession) return null;
+
+        refreshedSession.summary = summaryText;
+        refreshedSession.summaryStatus = 'ready';
+        refreshedSession.summaryUpdatedAt = Date.now();
+        refreshedSession.summaryError = '';
+        refreshedSession.summaryPrompt = promptTemplate;
+        refreshedSession.summarySignature = transcriptSource;
+        refreshedSession.updatedAt = Date.now();
+        upsertSession(refreshedSession);
+        persistSessions();
+        renderSummaryViewsForSession(refreshedSession.id);
+        return refreshedSession;
+      }
+
+      function applySummaryGenerationError(sessionId, requestToken, error) {
+        if (state.summaryRequestTokens[sessionId] !== requestToken) return null;
+        const refreshedSession = findSession(sessionId);
+        if (!refreshedSession) return null;
+
+        const detail = normaliseWhitespace(error && error.message ? error.message : String(error || ''));
+        refreshedSession.summaryStatus = 'error';
+        refreshedSession.summaryError = detail ? ('On-device summary generation failed: ' + detail) : 'On-device summary generation failed in this browser.';
+        refreshedSession.updatedAt = Date.now();
+        upsertSession(refreshedSession);
+        persistSessions();
+        renderSummaryViewsForSession(refreshedSession.id);
+        return refreshedSession;
       }
 
       function parseStructuredSummary(summaryText) {
@@ -865,10 +1133,6 @@
         refs.consultationSummaryMeta.textContent = getSummaryMetaText(session);
         refs.consultationSummary.innerHTML = buildSummaryPanelHtml(session);
         updateSummaryButton(refs.generateSummaryBtn, session);
-      }
-
-      function hasPromptApiSupport() {
-        return Boolean(state.supportsAiSummary);
       }
 
       function getDocumentTemplates() {
@@ -1238,8 +1502,7 @@
 
         if (!hasAiSummarySupport()) {
           if (showFeedback) showToast('On-device AI summarisation is not available in this browser.', 'warning', 4200);
-          renderConsultationSummary();
-          if (state.currentTab === 'history' && state.historySelectedSessionId === session.id) renderHistoryDetail();
+          renderSummaryViewsForSession(session.id);
           return;
         }
         if (!normaliseWhitespace(transcriptSource)) return;
@@ -1253,118 +1516,17 @@
         session.updatedAt = Date.now();
         upsertSession(session);
         persistSessions();
-        if (state.activeSession && state.activeSession.id === session.id) renderConsultationSummary();
-        if (state.currentTab === 'history' && state.historySelectedSessionId === session.id) renderHistoryDetail();
-
-        const finalPrompt = promptTemplate + '\n\nConsultation transcript:\n' + transcriptSource;
-        let sessionHandle = null;
+        renderSummaryViewsForSession(session.id);
 
         try {
-          const refreshedSession = findSession(session.id);
-          if (!refreshedSession) return;
-
-          if (!('LanguageModel' in self) && 'Summarizer' in self) {
-            sessionHandle = await Summarizer.create({
-              type: 'key-points',
-              format: 'markdown',
-              length: 'medium'
-            });
-
-            const summary = await sessionHandle.summarize(transcriptSource);
-            if (state.summaryRequestTokens[session.id] !== requestToken) return;
-
-            refreshedSession.summary = String(summary || '').trim();
-            refreshedSession.summaryStatus = 'ready';
-            refreshedSession.summaryUpdatedAt = Date.now();
-            refreshedSession.summaryError = '';
-            refreshedSession.summaryPrompt = promptTemplate;
-            refreshedSession.summarySignature = transcriptSource;
-            refreshedSession.updatedAt = Date.now();
-            upsertSession(refreshedSession);
-            persistSessions();
-            if (state.activeSession && state.activeSession.id === refreshedSession.id) renderConsultationSummary();
-            if (state.currentTab === 'history' && state.historySelectedSessionId === refreshedSession.id) renderHistoryDetail();
-            if (showFeedback) showToast('Summary generated.', 'success', 2200);
-            return;
-          }
-
-          const availability = await LanguageModel.availability({
-            expectedOutputLanguage: 'en',
-            expectedOutputs: [{
-              type: "text",
-              languages: ["en"]
-            }]
-          });
-          
-          if (availability !== 'available') {
-            if ('Summarizer' in self) {
-              sessionHandle = await Summarizer.create({
-                type: 'key-points',
-                format: 'markdown',
-                length: 'medium'
-              });
-
-              const fallbackSummary = await sessionHandle.summarize(transcriptSource);
-              if (state.summaryRequestTokens[session.id] !== requestToken) return;
-
-              refreshedSession.summary = String(fallbackSummary || '').trim();
-              refreshedSession.summaryStatus = 'ready';
-              refreshedSession.summaryUpdatedAt = Date.now();
-              refreshedSession.summaryError = '';
-              refreshedSession.summaryPrompt = promptTemplate;
-              refreshedSession.summarySignature = transcriptSource;
-              refreshedSession.updatedAt = Date.now();
-              upsertSession(refreshedSession);
-              persistSessions();
-              if (state.activeSession && state.activeSession.id === refreshedSession.id) renderConsultationSummary();
-              if (state.currentTab === 'history' && state.historySelectedSessionId === refreshedSession.id) renderHistoryDetail();
-              if (showFeedback) showToast('Summary generated.', 'success', 2200);
-              return;
-            }
-            throw new Error('Language model is not available: ' + availability);
-          }
-
-          sessionHandle = await LanguageModel.create({
-            expectedOutputLanguage: 'en',
-            expectedOutputs: [{
-              type: "text",
-              languages: ["en"]
-            }]
-          });
-
-          const result = await sessionHandle.prompt(finalPrompt);
-          if (state.summaryRequestTokens[session.id] !== requestToken) return;
-
-          const summaryText = String(result || '').trim();
-          if (!summaryText) throw new Error('The browser returned an empty summary.');
-
-          refreshedSession.summary = summaryText;
-          refreshedSession.summaryStatus = 'ready';
-          refreshedSession.summaryUpdatedAt = Date.now();
-          refreshedSession.summaryError = '';
-          refreshedSession.summaryPrompt = promptTemplate;
-          refreshedSession.summarySignature = transcriptSource;
-          refreshedSession.updatedAt = Date.now();
-          upsertSession(refreshedSession);
-          persistSessions();
-          if (state.activeSession && state.activeSession.id === refreshedSession.id) renderConsultationSummary();
-          if (state.currentTab === 'history' && state.historySelectedSessionId === refreshedSession.id) renderHistoryDetail();
+          const summaryText = await buildChunkedSummary(session, promptTemplate);
+          if (!normaliseWhitespace(summaryText)) throw new Error('The browser returned an empty summary.');
+          applyGeneratedSummary(session.id, requestToken, summaryText, promptTemplate, transcriptSource);
           if (showFeedback) showToast('Summary generated.', 'success', 2200);
         } catch (error) {
-          if (state.summaryRequestTokens[session.id] !== requestToken) return;
-          const refreshedSession = findSession(session.id);
-          if (!refreshedSession) return;
-          const detail = normaliseWhitespace(error && error.message ? error.message : String(error || ''));
-          refreshedSession.summaryStatus = 'error';
-          refreshedSession.summaryError = detail ? ('On-device summary generation failed: ' + detail) : 'On-device summary generation failed in this browser.';
-          refreshedSession.updatedAt = Date.now();
-          upsertSession(refreshedSession);
-          persistSessions();
-          if (state.activeSession && state.activeSession.id === refreshedSession.id) renderConsultationSummary();
-          if (state.currentTab === 'history' && state.historySelectedSessionId === refreshedSession.id) renderHistoryDetail();
+          applySummaryGenerationError(session.id, requestToken, error);
           if (showFeedback) showToast('Summary generation failed.', 'error', 4200);
         } finally {
-          closeTextSession(sessionHandle);
           if (state.summaryRequestTokens[session.id] === requestToken) delete state.summaryRequestTokens[session.id];
         }
       }
