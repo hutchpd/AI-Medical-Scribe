@@ -19,6 +19,7 @@
       <nav class="tabs" aria-label="Primary navigation">
         <button class="nav-tab active" data-tab="consultation" type="button">Consultation</button>
         <button class="nav-tab" data-tab="history" type="button">History</button>
+        <button class="nav-tab hidden" data-tab="documents" id="documentsTabBtn" type="button">Documents</button>
         <button class="nav-tab" data-tab="settings" type="button">Settings</button>
         <button class="nav-tab" data-tab="customisation" type="button">Customisation</button>
       </nav>
@@ -75,17 +76,39 @@
           </div>
         </div>
 
-        <div class="card summary-card">
-          <div class="card-header">
-            <div>
-              <h3>AI Summary</h3>
-              <div class="subtle-note" id="consultationSummaryMeta">Generated after stopping the session using on-device AI.</div>
+        <div class="ai-output-grid">
+          <div class="card summary-card">
+            <div class="card-header">
+              <div>
+                <h3>AI Summary</h3>
+                <div class="subtle-note" id="consultationSummaryMeta">Generated after stopping the session using on-device AI.</div>
+              </div>
+              <div class="inline-actions">
+                <button class="btn small" id="generateSummaryBtn" type="button">Generate Summary</button>
+              </div>
             </div>
-            <div class="inline-actions">
-              <button class="btn small" id="generateSummaryBtn" type="button">Generate Summary</button>
-            </div>
+            <div class="summary-output" id="consultationSummary"></div>
           </div>
-          <div class="summary-output" id="consultationSummary"></div>
+
+          <div class="card summary-card hidden" id="documentGenerationCard">
+            <div class="card-header">
+              <div>
+                <h3>Document Drafts</h3>
+                <div class="subtle-note" id="documentCardMeta">Generate rich text documents from the stopped transcript.</div>
+              </div>
+              <div class="inline-actions">
+                <button class="btn small" id="openDocumentsTabBtn" type="button">Open Documents</button>
+              </div>
+            </div>
+            <div class="field" style="margin-bottom: 12px;">
+              <label for="consultationDocumentType">Document type</label>
+              <select id="consultationDocumentType"></select>
+            </div>
+            <div class="inline-actions" style="margin-bottom: 14px;">
+              <button class="btn primary" id="generateDocumentBtn" type="button">Generate Document</button>
+            </div>
+            <div class="document-list compact" id="consultationDocumentsList"></div>
+          </div>
         </div>
 
         <div class="consultation-grid">
@@ -205,6 +228,49 @@
             <div class="history-detail" id="historyDetail">
               <div class="empty-state">Select a session from the list to open its transcript and notes.</div>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab-section" id="section-documents">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">Generated documents</p>
+            <h2>Create, review, and edit rich text documents from the stopped consultation</h2>
+            <p>Document templates are managed locally and generated in-browser from the current stopped session transcript.</p>
+          </div>
+        </div>
+
+        <div class="documents-grid">
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h3>Generate document</h3>
+                <div class="subtle-note" id="documentsMetaText">Select a document type to generate a draft.</div>
+              </div>
+            </div>
+            <div class="field" style="margin-bottom: 12px;">
+              <label for="documentsTemplateSelect">Document type</label>
+              <select id="documentsTemplateSelect"></select>
+            </div>
+            <div class="inline-actions" style="margin-bottom: 16px;">
+              <button class="btn primary" id="documentsGenerateBtn" type="button">Generate Document</button>
+            </div>
+            <div class="document-list" id="documentsList"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h3 id="documentDetailTitle">Document preview</h3>
+                <div class="subtle-note" id="documentDetailMeta">Generated documents use rich text HTML and can be edited inline.</div>
+              </div>
+              <div class="inline-actions">
+                <button class="btn small" id="copyDocumentTextBtn" type="button">Copy Text</button>
+                <button class="btn small" id="downloadDocumentBtn" type="button">Download HTML</button>
+              </div>
+            </div>
+            <div class="document-preview" id="documentPreview"></div>
           </div>
         </div>
       </section>
@@ -402,6 +468,26 @@
             <button class="btn primary" id="addCustomTagBtn" type="button">Add Tag</button>
             <div style="height: 12px;"></div>
             <div class="list-editor" id="customTagList"></div>
+          </div>
+
+          <div class="card document-templates-card">
+            <div class="card-header">
+              <div>
+                <h3>Document templates</h3>
+                <div class="subtle-note">Create or customise the rich text documents that can be generated from a stopped transcript.</div>
+              </div>
+            </div>
+            <div class="field" style="margin-bottom: 12px;">
+              <label for="newDocumentTemplateName">New document type</label>
+              <input id="newDocumentTemplateName" type="text" placeholder="e.g. Mental health care plan" />
+            </div>
+            <div class="field" style="margin-bottom: 12px;">
+              <label for="newDocumentTemplateInstructions">Template instructions</label>
+              <textarea id="newDocumentTemplateInstructions" class="textarea" rows="7" placeholder="Describe what the generated document should contain and how it should be structured..."></textarea>
+            </div>
+            <button class="btn primary" id="addDocumentTemplateBtn" type="button">Add Document Type</button>
+            <div style="height: 12px;"></div>
+            <div class="list-editor" id="documentTemplateList"></div>
           </div>
         </div>
       </section>

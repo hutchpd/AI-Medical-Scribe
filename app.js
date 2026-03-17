@@ -86,6 +86,64 @@
         return 'The following is a transcript from a consultation. Summarise it into bullet point doctors notes with the sub headings Subjective, Examination, Assessment and Plan. If a heading has no supporting information, write "- Not stated" under that heading. Keep the wording concise and clinical.';
       }
 
+      function createDefaultDocumentTemplates() {
+        return [
+          {
+            id: 'patient-letter',
+            name: 'Patient letter',
+            instructions: 'Create a patient-friendly follow-up letter in semantic HTML. Include a clear heading, a short summary of the consultation, key findings, treatment or recommendations, any medicines discussed, follow-up steps, and safety-netting advice. Use plain English and a warm but professional tone.'
+          },
+          {
+            id: 'letter-to-specialist',
+            name: 'Letter to Specialist',
+            instructions: 'Create a referral or update letter to a specialist in semantic HTML. Include patient identifiers if available from the transcript, reason for referral, relevant history, examination findings, investigations, current treatment, specific questions or requests of the specialist, and urgency if apparent. Use concise clinical language.'
+          },
+          {
+            id: 'workers-comp',
+            name: 'Workers comp',
+            instructions: 'Create a workers compensation clinical document in semantic HTML. Include presenting injury or condition, mechanism or workplace context if mentioned, functional impact, current capacity for work, treatment plan, restrictions, review timeframe, and any follow-up actions. Keep the language factual and suitable for occupational documentation.'
+          },
+          {
+            id: 'patient-sms',
+            name: 'Patient SMS',
+            instructions: 'Create a short patient SMS in semantic HTML using one or two brief paragraphs only. Summarise the key instruction, follow-up arrangement, and any urgent safety-netting point from the consultation. Keep it concise, plain-language, and suitable for a text message.'
+          },
+          {
+            id: 'asthma-action-plan',
+            name: 'Asthma Action plan',
+            instructions: 'Create an asthma action plan in semantic HTML. Use clear sections or a simple table for baseline management, warning signs, escalation steps, medication guidance mentioned in the transcript, and when to seek urgent care. Use patient-friendly wording while preserving clinical accuracy.'
+          },
+          {
+            id: 'medical-certificate',
+            name: 'Medical certificate',
+            instructions: 'Create a draft medical certificate in semantic HTML. Include practitioner heading, the medical condition or reason if appropriate from the transcript, relevant dates if mentioned, period affected, any restrictions or fitness advice, and a brief statement appropriate for a certificate draft. Keep it formal and concise.'
+          },
+          {
+            id: 'letter-to-referring-clinician',
+            name: 'Letter to referring clinician',
+            instructions: 'Create a response letter to the referring clinician in semantic HTML. Include reason for consultation, relevant subjective history, examination findings, assessment, plan, investigations or treatment changes, and follow-up recommendations. Use professional correspondence style and structured clinical language.'
+          },
+          {
+            id: 'access-request',
+            name: 'Access Request',
+            instructions: 'Create an access request style document in semantic HTML. Include the reason for requested access, relevant functional limitations or medical context from the consultation, how the condition affects participation or services, recommended supports or accommodations, and any review timeframe. Keep the tone formal and evidence-oriented.'
+          }
+        ];
+      }
+
+      function createSessionDocument(overrides = {}) {
+        const now = Date.now();
+        return {
+          id: overrides.id || uid('document'),
+          templateId: overrides.templateId || '',
+          templateName: overrides.templateName || 'Document',
+          title: overrides.title || overrides.templateName || 'Document',
+          content: String(overrides.content || ''),
+          createdAt: typeof overrides.createdAt === 'number' ? overrides.createdAt : now,
+          updatedAt: typeof overrides.updatedAt === 'number' ? overrides.updatedAt : now
+        };
+      }
+
       function formatClock(timestamp) {
         if (!timestamp) return '-';
         return new Intl.DateTimeFormat([], {
@@ -207,8 +265,8 @@
         });
       }
 
-      function downloadTextFile(filename, content) {
-        const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+      function downloadTextFile(filename, content, mimeType = 'text/plain;charset=utf-8') {
+        const blob = new Blob([content], { type: mimeType });
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = url;
@@ -259,7 +317,8 @@
             { id: uid('macro'), label: 'Safety-netting', text: 'Safety-netting advice provided. Red flags discussed and patient aware of when to seek urgent review.' },
             { id: uid('macro'), label: 'Follow-up', text: 'Follow-up arranged with appropriate timeframe and patient advised regarding next steps.' }
           ],
-          customTags: ['Urgent', 'Follow-up', 'Medication review']
+          customTags: ['Urgent', 'Follow-up', 'Medication review'],
+          documentTemplates: createDefaultDocumentTemplates()
         };
       }
 
@@ -306,13 +365,15 @@
           summaryUpdatedAt: typeof overrides.summaryUpdatedAt === 'number' ? overrides.summaryUpdatedAt : null,
           summaryError: String(overrides.summaryError || ''),
           summaryPrompt: String(overrides.summaryPrompt || ''),
-          summarySignature: String(overrides.summarySignature || '')
+          summarySignature: String(overrides.summarySignature || ''),
+          documents: Array.isArray(overrides.documents) ? overrides.documents.map((documentItem) => createSessionDocument(documentItem)) : []
         };
       }
 
       function normaliseSession(rawSession) {
         const session = createSession(rawSession || {});
         session.transcriptEntries = (Array.isArray(rawSession && rawSession.transcriptEntries) ? rawSession.transcriptEntries : []).map((entry) => createTranscriptEntry(entry));
+        session.documents = (Array.isArray(rawSession && rawSession.documents) ? rawSession.documents : []).map((documentItem) => createSessionDocument(documentItem));
         session.tags = dedupeStrings(rawSession && rawSession.tags);
         if (session.status === 'listening') {
           session.status = 'paused';
@@ -395,6 +456,13 @@
         merged.defaultConsultationType = normaliseWhitespace(merged.defaultConsultationType) || base.defaultConsultationType;
         merged.macros = Array.isArray(saved && saved.macros) ? saved.macros.map((macro) => ({ id: macro.id || uid('macro'), label: normaliseWhitespace(macro.label) || 'Snippet', text: String(macro.text || '') })) : base.macros;
         merged.customTags = dedupeStrings(Array.isArray(saved && saved.customTags) ? saved.customTags : base.customTags);
+        merged.documentTemplates = Array.isArray(saved && saved.documentTemplates)
+          ? saved.documentTemplates.map((template, index) => ({
+              id: template.id || uid('doctype_' + index),
+              name: normaliseWhitespace(template.name) || ('Document ' + String(index + 1)),
+              instructions: String(template.instructions || '').trim()
+            })).filter((template) => template.instructions)
+          : base.documentTemplates;
         return merged;
       }
 
@@ -450,6 +518,7 @@
         historySelectedSessionId: null,
         historyEditMode: false,
         historyDetailSearch: '',
+        selectedDocumentId: null,
         timerIntervalId: null,
         autoSaveIntervalId: null,
         speechProvider: null,
@@ -478,6 +547,12 @@
         consultationSummary: $('consultationSummary'),
         consultationSummaryMeta: $('consultationSummaryMeta'),
         generateSummaryBtn: $('generateSummaryBtn'),
+        documentGenerationCard: $('documentGenerationCard'),
+        documentCardMeta: $('documentCardMeta'),
+        consultationDocumentType: $('consultationDocumentType'),
+        generateDocumentBtn: $('generateDocumentBtn'),
+        openDocumentsTabBtn: $('openDocumentsTabBtn'),
+        consultationDocumentsList: $('consultationDocumentsList'),
         transcriptSearch: $('transcriptSearch'),
         copyTranscriptBtn: $('copyTranscriptBtn'),
         exportTranscriptBtn: $('exportTranscriptBtn'),
@@ -494,6 +569,7 @@
         sessionSummaryLabel: $('sessionSummaryLabel'),
         sessionList: $('sessionList'),
         historyCount: $('historyCount'),
+        documentsTabBtn: $('documentsTabBtn'),
         historyPatientFilter: $('historyPatientFilter'),
         historyClinicianFilter: $('historyClinicianFilter'),
         historyDateFilter: $('historyDateFilter'),
@@ -516,6 +592,15 @@
         settingLineSpacingValue: $('settingLineSpacingValue'),
         settingSummaryPrompt: $('settingSummaryPrompt'),
         settingSummaryAvailability: $('settingSummaryAvailability'),
+        documentsTemplateSelect: $('documentsTemplateSelect'),
+        documentsGenerateBtn: $('documentsGenerateBtn'),
+        documentsList: $('documentsList'),
+        documentPreview: $('documentPreview'),
+        documentDetailTitle: $('documentDetailTitle'),
+        documentDetailMeta: $('documentDetailMeta'),
+        documentsMetaText: $('documentsMetaText'),
+        copyDocumentTextBtn: $('copyDocumentTextBtn'),
+        downloadDocumentBtn: $('downloadDocumentBtn'),
         customOrgName: $('customOrgName'),
         customBrandColor: $('customBrandColor'),
         customBrandColorValue: $('customBrandColorValue'),
@@ -528,7 +613,11 @@
         macroList: $('macroList'),
         newCustomTag: $('newCustomTag'),
         addCustomTagBtn: $('addCustomTagBtn'),
-        customTagList: $('customTagList')
+        customTagList: $('customTagList'),
+        newDocumentTemplateName: $('newDocumentTemplateName'),
+        newDocumentTemplateInstructions: $('newDocumentTemplateInstructions'),
+        addDocumentTemplateBtn: $('addDocumentTemplateBtn'),
+        documentTemplateList: $('documentTemplateList')
       };
 
       class WebkitSpeechProvider {
@@ -773,6 +862,297 @@
         updateSummaryButton(refs.generateSummaryBtn, session);
       }
 
+      function hasPromptApiSupport() {
+        return Boolean(state.supportsAiSummary);
+      }
+
+      function getDocumentTemplates() {
+        return Array.isArray(state.customisation.documentTemplates) ? state.customisation.documentTemplates : [];
+      }
+
+      function findDocumentTemplate(templateId) {
+        return getDocumentTemplates().find((template) => template.id === templateId) || null;
+      }
+
+      function canGenerateDocumentsForSession(session) {
+        return Boolean(session && session.status === 'stopped' && hasSummarisableTranscript(session));
+      }
+
+      function getDocumentTargetSession() {
+        const selectedHistorySession = getSelectedHistorySession();
+        const activeSession = canGenerateDocumentsForSession(state.activeSession) ? state.activeSession : null;
+        const historySession = canGenerateDocumentsForSession(selectedHistorySession) ? selectedHistorySession : null;
+        if (state.currentTab === 'history' || state.currentTab === 'documents') return historySession || activeSession;
+        return activeSession || historySession;
+      }
+
+      function getSelectedSessionDocument(session) {
+        if (!session || !Array.isArray(session.documents) || !session.documents.length) return null;
+        return session.documents.find((documentItem) => documentItem.id === state.selectedDocumentId) || session.documents[0] || null;
+      }
+
+      function getDocumentPreviewText(documentItem) {
+        return String(documentItem && documentItem.content ? documentItem.content : '')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+      }
+
+      function ensureSelectedDocument(session) {
+        const selectedDocument = getSelectedSessionDocument(session);
+        state.selectedDocumentId = selectedDocument ? selectedDocument.id : null;
+      }
+
+      function setSelectedDocument(documentId) {
+        state.selectedDocumentId = documentId || null;
+      }
+
+      function sanitizeRichTextMarkup(markup) {
+        const allowedTags = new Set(['A', 'B', 'BLOCKQUOTE', 'BR', 'DIV', 'EM', 'H1', 'H2', 'H3', 'H4', 'HR', 'I', 'LI', 'OL', 'P', 'SPAN', 'STRONG', 'TABLE', 'TBODY', 'TD', 'TH', 'THEAD', 'TR', 'U', 'UL']);
+        const template = document.createElement('template');
+        template.innerHTML = String(markup || '');
+
+        const sanitizeNode = (node) => {
+          if (node.nodeType === Node.TEXT_NODE) return document.createTextNode(node.textContent || '');
+          if (node.nodeType !== Node.ELEMENT_NODE) return document.createDocumentFragment();
+
+          if (!allowedTags.has(node.tagName)) {
+            const fragment = document.createDocumentFragment();
+            Array.from(node.childNodes).forEach((childNode) => fragment.appendChild(sanitizeNode(childNode)));
+            return fragment;
+          }
+
+          const element = document.createElement(node.tagName.toLowerCase());
+          if (node.tagName === 'A') {
+            const href = String(node.getAttribute('href') || '');
+            if (/^(https?:|mailto:|tel:)/i.test(href)) {
+              element.setAttribute('href', href);
+              element.setAttribute('target', '_blank');
+              element.setAttribute('rel', 'noopener noreferrer');
+            }
+          }
+          Array.from(node.childNodes).forEach((childNode) => element.appendChild(sanitizeNode(childNode)));
+          return element;
+        };
+
+        const output = document.createElement('div');
+        Array.from(template.content.childNodes).forEach((childNode) => output.appendChild(sanitizeNode(childNode)));
+        return output.innerHTML.trim();
+      }
+
+      function wrapPlainTextAsHtml(text) {
+        const blocks = String(text || '')
+          .replace(/\r/g, '')
+          .split(/\n\s*\n/)
+          .map((block) => normaliseWhitespace(block))
+          .filter(Boolean);
+        return blocks.length
+          ? blocks.map((block) => '<p>' + escapeHtml(block) + '</p>').join('')
+          : '<p>No content generated.</p>';
+      }
+
+      function normaliseGeneratedDocumentMarkup(markup) {
+        const trimmed = String(markup || '').trim();
+        const html = /<[a-z][\s\S]*>/i.test(trimmed) ? trimmed : wrapPlainTextAsHtml(trimmed);
+        return sanitizeRichTextMarkup(html);
+      }
+
+      function getDocumentTemplatePrompt(template, session, transcriptSource) {
+        return [
+          'Generate a rich text HTML fragment for the following medical document type.',
+          'Return semantic HTML only. Do not return markdown. Do not use code fences. Do not include <html>, <head>, <body>, <script>, or <style> tags.',
+          'Use headings, paragraphs, lists, and tables when appropriate.',
+          'Document type: ' + template.name,
+          'Template instructions: ' + template.instructions,
+          'Organisation: ' + (state.customisation.organisationName || ''),
+          'Patient: ' + (session.patientName || ''),
+          'Clinician: ' + (session.clinicianName || ''),
+          'Consultation Type: ' + (session.consultationType || ''),
+          '',
+          'Consultation transcript:',
+          transcriptSource
+        ].join('\n');
+      }
+
+      function getDocumentTargetLabel(session) {
+        if (!session) return 'No session selected';
+        const identity = session.patientName || session.consultationType || 'Unnamed session';
+        const timestamp = formatDateTime(session.startedAt || session.createdAt);
+        return timestamp ? (identity + ' • ' + timestamp) : identity;
+      }
+
+      function getPreferredDocumentTemplateId() {
+        const templates = getDocumentTemplates();
+        if (!templates.length) return null;
+        const selectedTemplateId = refs.documentsTemplateSelect.value || refs.consultationDocumentType.value;
+        return templates.find((template) => template.id === selectedTemplateId)
+          ? selectedTemplateId
+          : templates[0].id;
+      }
+
+      function renderConsultationDocuments() {
+        const session = state.activeSession;
+        const canShow = canGenerateDocumentsForSession(session);
+        refs.documentGenerationCard.classList.toggle('hidden', !canShow);
+        if (!canShow) {
+          refs.consultationDocumentType.innerHTML = '';
+          refs.consultationDocumentsList.innerHTML = '';
+          refs.documentCardMeta.textContent = 'Generate rich text documents from the stopped transcript.';
+          refs.generateDocumentBtn.disabled = true;
+          refs.openDocumentsTabBtn.disabled = true;
+          return;
+        }
+
+        const templates = getDocumentTemplates();
+        refs.consultationDocumentType.innerHTML = templates.length
+          ? templates.map((template) => '<option value="' + escapeAttribute(template.id) + '">' + escapeHtml(template.name) + '</option>').join('')
+          : '';
+
+        if (!templates.find((template) => template.id === refs.consultationDocumentType.value) && templates.length) {
+          refs.consultationDocumentType.value = templates[0].id;
+        }
+        refs.generateDocumentBtn.disabled = !hasPromptApiSupport() || !templates.length;
+        refs.openDocumentsTabBtn.disabled = false;
+
+        const documents = Array.isArray(session.documents) ? session.documents.slice().sort((left, right) => (right.updatedAt || 0) - (left.updatedAt || 0)) : [];
+        refs.documentCardMeta.textContent = documents.length
+          ? ('Generated ' + String(documents.length) + ' document' + (documents.length === 1 ? '' : 's') + ' for this session.')
+          : 'Generate rich text documents from the stopped transcript.';
+        refs.consultationDocumentsList.innerHTML = documents.length
+          ? documents.map((documentItem) => '<button type="button" class="document-card" data-document-id="' + escapeAttribute(documentItem.id) + '"><h4>' + escapeHtml(documentItem.title || documentItem.templateName) + '</h4><p>' + escapeHtml(getDocumentPreviewText(documentItem).slice(0, 150) || 'Rich text document') + '</p><div class="document-card-meta"><span class="plain-chip">' + escapeHtml(formatDateTime(documentItem.updatedAt)) + '</span></div></button>').join('')
+          : '<div class="empty-state small">No documents have been generated for this session yet.</div>';
+      }
+
+      function renderDocumentsTab() {
+        const session = getDocumentTargetSession();
+        const canShow = canGenerateDocumentsForSession(session);
+        refs.documentsTabBtn.classList.toggle('hidden', !canShow);
+
+        if (state.currentTab === 'documents' && !canShow) {
+          switchTab(getSelectedHistorySession() ? 'history' : 'consultation');
+          return;
+        }
+
+        const templates = getDocumentTemplates();
+        refs.documentsTemplateSelect.innerHTML = templates.length
+          ? templates.map((template) => '<option value="' + escapeAttribute(template.id) + '">' + escapeHtml(template.name) + '</option>').join('')
+          : '';
+
+        if (!templates.find((template) => template.id === refs.documentsTemplateSelect.value) && templates.length) {
+          refs.documentsTemplateSelect.value = templates[0].id;
+        }
+
+        refs.documentsGenerateBtn.disabled = !canShow || !hasPromptApiSupport() || !templates.length;
+        refs.copyDocumentTextBtn.disabled = true;
+        refs.downloadDocumentBtn.disabled = true;
+
+        if (!canShow) {
+          refs.documentsMetaText.textContent = hasPromptApiSupport()
+            ? 'Stop the active consultation or open a stopped history session to enable document generation.'
+            : 'Document generation requires the Prompt API in this browser.';
+          refs.documentsList.innerHTML = '<div class="empty-state small">Stop a transcripted consultation or select a stopped history session to generate and review documents here.</div>';
+          refs.documentDetailTitle.textContent = 'Document preview';
+          refs.documentDetailMeta.textContent = 'Generated documents use rich text HTML and can be edited inline.';
+          refs.documentPreview.innerHTML = '<div class="document-preview-empty">Stop a transcripted consultation or select a stopped history session to unlock document generation.</div>';
+          refs.documentPreview.removeAttribute('contenteditable');
+          return;
+        }
+
+        const targetLabel = getDocumentTargetLabel(session);
+        refs.documentsMetaText.textContent = hasPromptApiSupport()
+          ? ('Target session: ' + targetLabel + '. Generate rich text drafts from this stopped transcript.')
+          : 'Document generation requires the Prompt API in this browser.';
+
+        const documents = Array.isArray(session.documents) ? session.documents.slice().sort((left, right) => (right.updatedAt || 0) - (left.updatedAt || 0)) : [];
+        ensureSelectedDocument(session);
+        const selectedDocument = getSelectedSessionDocument(session);
+        refs.documentsList.innerHTML = documents.length
+          ? documents.map((documentItem) => '<button type="button" class="document-card' + (selectedDocument && selectedDocument.id === documentItem.id ? ' selected' : '') + '" data-documents-document-id="' + escapeAttribute(documentItem.id) + '"><h4>' + escapeHtml(documentItem.title || documentItem.templateName) + '</h4><p>' + escapeHtml(getDocumentPreviewText(documentItem).slice(0, 180) || 'Rich text document') + '</p><div class="document-card-meta"><span class="plain-chip">' + escapeHtml(documentItem.templateName) + '</span><span class="plain-chip secondary">' + escapeHtml(formatDateTime(documentItem.updatedAt)) + '</span></div></button>').join('')
+          : '<div class="empty-state small">No documents have been generated for this session yet.</div>';
+
+        if (!selectedDocument) {
+          refs.documentDetailTitle.textContent = 'Document preview';
+          refs.documentDetailMeta.textContent = 'No document selected for ' + targetLabel + '.';
+          refs.documentPreview.innerHTML = '<div class="document-preview-empty">Generate a document to preview and edit it here.</div>';
+          refs.documentPreview.removeAttribute('contenteditable');
+          return;
+        }
+
+        refs.copyDocumentTextBtn.disabled = false;
+        refs.downloadDocumentBtn.disabled = false;
+        refs.documentDetailTitle.textContent = selectedDocument.title || selectedDocument.templateName;
+        refs.documentDetailMeta.textContent = targetLabel + ' • Last updated ' + formatDateTime(selectedDocument.updatedAt) + ' • Rich text HTML';
+        refs.documentPreview.innerHTML = normaliseGeneratedDocumentMarkup(selectedDocument.content);
+        refs.documentPreview.setAttribute('contenteditable', 'true');
+      }
+
+      async function generateSessionDocument(sessionId, templateId, options = {}) {
+        const session = findSession(sessionId);
+        const template = findDocumentTemplate(templateId);
+        if (!session || !template) return;
+        if (!hasPromptApiSupport()) {
+          showToast('Document generation requires the Prompt API in this browser.', 'warning', 4200);
+          return;
+        }
+        if (!canGenerateDocumentsForSession(session)) return;
+
+        const transcriptSource = getTranscriptSummarySource(session);
+        const requestPrompt = getDocumentTemplatePrompt(template, session, transcriptSource);
+        let sessionHandle = null;
+
+        try {
+          const availability = await LanguageModel.availability({
+            expectedOutputLanguage: 'en',
+            expectedOutputs: [{ type: 'text', languages: ['en'] }]
+          });
+          if (availability !== 'available') throw new Error('Language model is not available: ' + availability);
+
+          sessionHandle = await LanguageModel.create({
+            expectedOutputLanguage: 'en',
+            expectedOutputs: [{ type: 'text', languages: ['en'] }]
+          });
+
+          const result = await sessionHandle.prompt(requestPrompt);
+          if (!String(result || '').trim()) throw new Error('The browser returned an empty document.');
+          const markup = normaliseGeneratedDocumentMarkup(result);
+
+          const refreshedSession = findSession(session.id);
+          if (!refreshedSession) return;
+
+          const existingDocument = (refreshedSession.documents || []).find((documentItem) => documentItem.templateId === template.id);
+          const nextTimestamp = Date.now();
+          if (existingDocument) {
+            existingDocument.title = template.name;
+            existingDocument.templateName = template.name;
+            existingDocument.content = markup;
+            existingDocument.updatedAt = nextTimestamp;
+          } else {
+            refreshedSession.documents = Array.isArray(refreshedSession.documents) ? refreshedSession.documents : [];
+            refreshedSession.documents.unshift(createSessionDocument({
+              templateId: template.id,
+              templateName: template.name,
+              title: template.name,
+              content: markup,
+              createdAt: nextTimestamp,
+              updatedAt: nextTimestamp
+            }));
+          }
+
+          refreshedSession.updatedAt = nextTimestamp;
+          upsertSession(refreshedSession);
+          setSelectedDocument(((refreshedSession.documents || []).find((documentItem) => documentItem.templateId === template.id) || {}).id || null);
+          persistSessions();
+          renderConsultationDocuments();
+          renderDocumentsTab();
+          if (options.openTab) switchTab('documents');
+          showToast(template.name + ' generated.', 'success', 2200);
+        } catch (error) {
+          showToast('Document generation failed: ' + normaliseWhitespace(error && error.message ? error.message : String(error || 'Unknown error')), 'error', 4200);
+        } finally {
+          closeTextSession(sessionHandle);
+        }
+      }
+
       async function generateSessionSummary(sessionId, options = {}) {
         const session = findSession(sessionId);
         if (!session) return;
@@ -955,6 +1335,7 @@
         const formValues = readConsultationForm();
         const session = createSession({ patientName: formValues.patientName, clinicianName: formValues.clinicianName, consultationType: formValues.consultationType, manualNotes: formValues.manualNotes, tags: formValues.tags.slice(), status, startedAt: now, createdAt: now, updatedAt: now, elapsedMs: 0, lastStartedSegmentAt: null, stoppedAt: status === 'stopped' ? now : null });
         state.activeSession = session;
+        state.selectedDocumentId = null;
         state.consultationDraftTags = formValues.tags.slice();
         upsertSession(session);
         return session;
@@ -976,6 +1357,7 @@
         refs.transcriptSearch.value = '';
         state.consultationDraftTags = [];
         state.activeSession = null;
+        state.selectedDocumentId = null;
         state.interimText = '';
         state.transcriptSearch = '';
       }
@@ -1168,7 +1550,9 @@
         renderConsultationTagSelector();
         renderConsultationChrome();
         renderConsultationSummary();
+        renderConsultationDocuments();
         renderConsultationTranscript();
+        renderDocumentsTab();
       }
 
       function getFilteredSessions() {
@@ -1258,6 +1642,25 @@
             await generateSessionSummary(session.id, { force: true });
           });
         }
+        const generateDocumentButton = detailRoot.querySelector('#historyGenerateDocumentBtn');
+        if (generateDocumentButton) {
+          generateDocumentButton.addEventListener('click', async () => {
+            const templateId = getPreferredDocumentTemplateId();
+            if (!templateId) {
+              showToast('Add a document template before generating a document.', 'warning');
+              return;
+            }
+            await generateSessionDocument(session.id, templateId, { openTab: true });
+          });
+        }
+        const openDocumentsButton = detailRoot.querySelector('#historyOpenDocumentsBtn');
+        if (openDocumentsButton) {
+          openDocumentsButton.addEventListener('click', () => {
+            if (!canGenerateDocumentsForSession(session)) return;
+            renderDocumentsTab();
+            switchTab('documents');
+          });
+        }
         detailRoot.querySelectorAll('[data-history-tag]').forEach((button) => {
           button.addEventListener('click', () => {
             const tag = button.dataset.historyTag;
@@ -1285,6 +1688,7 @@
           return;
         }
         const editable = state.historyEditMode;
+        const canShowDocuments = canGenerateDocumentsForSession(session);
         const detail = refs.historyDetail;
         detail.innerHTML = '<div class="detail-grid">' +
           '<div class="field"><span class="label">Patient</span>' + (editable ? '<input data-history-field="patientName" value="' + escapeAttribute(session.patientName || '') + '" />' : '<div class="static-value">' + escapeHtml(session.patientName || '-') + '</div>') + '</div>' +
@@ -1293,7 +1697,7 @@
           '</div>' +
           '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Metadata</h4><div class="subtle-note">Started ' + escapeHtml(formatDateTime(session.startedAt || session.createdAt)) + ' • Duration ' + escapeHtml(formatDuration(getSessionElapsedMs(session))) + ' • Updated ' + escapeHtml(formatDateTime(session.updatedAt)) + '</div></div><div class="inline-actions"><span class="status-pill ' + escapeAttribute(session.status) + '">' + escapeHtml(titleCaseStatus(session.status)) + '</span>' + (session.archived ? '<span class="archived-badge">Archived</span>' : '') + '</div></div><div class="tag-selector" id="historyTagList"></div></div>' +
           '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Manual notes</h4><div class="subtle-note">Editable when history detail is in edit mode.</div></div></div>' + (editable ? '<textarea id="historyNotesEditor" class="manual-notes" style="min-height:140px;">' + escapeHtml(session.manualNotes || '') + '</textarea>' : '<div class="note-preview">' + escapeHtml(session.manualNotes || 'No manual notes.').replace(/\n/g, '<br>') + '</div>') + '</div>' +
-          '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">AI summary</h4><div class="subtle-note" id="historySummaryMeta"></div></div><button class="btn small" type="button" id="historyGenerateSummaryBtn">Generate Summary</button></div><div class="summary-output" id="historySummaryContainer"></div></div>' +
+          '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">AI summary</h4><div class="subtle-note" id="historySummaryMeta"></div></div><div class="inline-actions">' + (canShowDocuments ? '<button class="btn small secondary" type="button" id="historyGenerateDocumentBtn">Generate Document</button><button class="btn small secondary" type="button" id="historyOpenDocumentsBtn">Open Documents</button>' : '') + '<button class="btn small" type="button" id="historyGenerateSummaryBtn">Generate Summary</button></div></div><div class="summary-output" id="historySummaryContainer"></div></div>' +
           '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Transcript</h4><div class="subtle-note">' + (editable && !state.historyDetailSearch ? 'Stopped transcripts can be corrected inline.' : 'Search to filter transcript segments.') + '</div></div><input id="historyDetailSearch" class="search-input" type="search" placeholder="Search within this transcript..." value="' + escapeAttribute(state.historyDetailSearch || '') + '" /></div><div class="transcript-container history-transcript" id="historyTranscriptContainer"></div></div>';
         renderHistoryTags(detail.querySelector('#historyTagList'), session, editable);
         detail.querySelector('#historySummaryMeta').textContent = getSummaryMetaText(session);
@@ -1310,6 +1714,7 @@
           persistSessionsDebounced();
           renderHistoryDetail();
         } });
+        renderDocumentsTab();
         attachHistoryDetailListeners(session, detail);
       }
 
@@ -1365,6 +1770,15 @@
         refs.customTagList.innerHTML = tags.map((tag, index) => '<div class="list-editor-item" data-tag-index="' + index + '"><div class="field"><label>Tag</label><input class="custom-tag-value" value="' + escapeAttribute(tag) + '" /></div><div class="inline-actions"><button class="btn small" type="button" data-action="save-tag" data-tag-index="' + index + '">Save</button><button class="btn small danger" type="button" data-action="delete-tag" data-tag-index="' + index + '">Delete</button></div></div>').join('');
       }
 
+      function renderDocumentTemplateEditor() {
+        const templates = getDocumentTemplates();
+        if (!templates.length) {
+          refs.documentTemplateList.innerHTML = '<div class="empty-state small">No document templates yet. Add one above to enable document generation.</div>';
+          return;
+        }
+        refs.documentTemplateList.innerHTML = templates.map((template) => '<div class="list-editor-item" data-document-template-id="' + escapeAttribute(template.id) + '"><div class="field"><label>Document type</label><input class="document-template-name" value="' + escapeAttribute(template.name) + '" /></div><div class="field"><label>Instructions</label><textarea class="document-template-instructions" rows="6">' + escapeHtml(template.instructions) + '</textarea></div><div class="inline-actions"><button class="btn small" type="button" data-action="save-document-template" data-document-template-id="' + escapeAttribute(template.id) + '">Save</button><button class="btn small danger" type="button" data-action="delete-document-template" data-document-template-id="' + escapeAttribute(template.id) + '">Delete</button></div></div>').join('');
+      }
+
       function renderCustomisationForm() {
         refs.customOrgName.value = state.customisation.organisationName || '';
         refs.customBrandColor.value = state.customisation.brandingColor || '#2f7df6';
@@ -1373,6 +1787,7 @@
         applyThemeAndBranding();
         renderMacroEditor();
         renderCustomTagEditor();
+        renderDocumentTemplateEditor();
         renderMacroBar();
         renderConsultationTagSelector();
       }
@@ -1394,7 +1809,9 @@
         renderSettingsForm();
         renderConsultationChrome();
         renderConsultationSummary();
+        renderConsultationDocuments();
         renderConsultationTranscript();
+        renderDocumentsTab();
         renderHistoryDetail();
         resetAutoSaveInterval();
         if (!state.settings.interimResults) state.interimText = '';
@@ -1472,10 +1889,12 @@
         upsertSession(session);
         if (state.activeSession && state.activeSession.id === session.id) {
           renderConsultationSummary();
+          renderConsultationDocuments();
           renderConsultationTranscript();
           renderConsultationChrome();
           scrollTranscriptToBottom(refs.transcriptContainer);
         }
+        renderDocumentsTab();
         if (state.currentTab === 'history') {
           if (state.historySelectedSessionId === session.id) renderHistoryDetail();
           renderHistoryList();
@@ -1665,6 +2084,7 @@
         document.querySelectorAll('.tab-section').forEach((section) => section.classList.toggle('active', section.id === 'section-' + tabName));
         if (tabName === 'consultation') renderConsultation();
         else if (tabName === 'history') renderHistory();
+        else if (tabName === 'documents') renderDocumentsTab();
         else if (tabName === 'settings') renderSettingsForm();
         else if (tabName === 'customisation') renderCustomisationForm();
       }
@@ -1690,6 +2110,56 @@
         refs.generateSummaryBtn.addEventListener('click', async () => {
           if (!state.activeSession) return;
           await generateSessionSummary(state.activeSession.id, { force: true });
+        });
+        refs.generateDocumentBtn.addEventListener('click', async () => {
+          if (!state.activeSession) return;
+          await generateSessionDocument(state.activeSession.id, refs.consultationDocumentType.value, { openTab: false });
+        });
+        refs.openDocumentsTabBtn.addEventListener('click', () => {
+          if (!canGenerateDocumentsForSession(state.activeSession)) return;
+          switchTab('documents');
+        });
+        refs.consultationDocumentsList.addEventListener('click', (event) => {
+          const card = event.target.closest('[data-document-id]');
+          if (!card) return;
+          setSelectedDocument(card.dataset.documentId);
+          switchTab('documents');
+        });
+        refs.documentsGenerateBtn.addEventListener('click', async () => {
+          const session = getDocumentTargetSession();
+          if (!session) return;
+          await generateSessionDocument(session.id, refs.documentsTemplateSelect.value, { openTab: true });
+        });
+        refs.documentsList.addEventListener('click', (event) => {
+          const card = event.target.closest('[data-documents-document-id]');
+          if (!card) return;
+          setSelectedDocument(card.dataset.documentsDocumentId);
+          renderDocumentsTab();
+        });
+        refs.documentPreview.addEventListener('blur', () => {
+          const session = getDocumentTargetSession();
+          const documentItem = getSelectedSessionDocument(session);
+          if (!session || !documentItem) return;
+          documentItem.content = sanitizeRichTextMarkup(refs.documentPreview.innerHTML);
+          documentItem.updatedAt = Date.now();
+          session.updatedAt = Date.now();
+          upsertSession(session);
+          persistSessionsDebounced();
+          renderConsultationDocuments();
+          renderDocumentsTab();
+        });
+        refs.copyDocumentTextBtn.addEventListener('click', () => {
+          const documentItem = getSelectedSessionDocument(getDocumentTargetSession());
+          if (!documentItem) return;
+          copyToClipboard(getDocumentPreviewText(documentItem)).then(() => showToast('Document text copied to the clipboard.', 'success')).catch(() => showToast('Copy failed in this browser context.', 'error'));
+        });
+        refs.downloadDocumentBtn.addEventListener('click', () => {
+          const session = getDocumentTargetSession();
+          const documentItem = getSelectedSessionDocument(session);
+          if (!session || !documentItem) return;
+          const filename = sanitizeFilenamePart((session.patientName || 'document') + '_' + (documentItem.title || documentItem.templateName || 'document')) + '.html';
+          downloadTextFile(filename, documentItem.content, 'text/html;charset=utf-8');
+          showToast('Document HTML downloaded.', 'success', 2200);
         });
         refs.copyTranscriptBtn.addEventListener('click', copyCurrentTranscript);
         refs.exportTranscriptBtn.addEventListener('click', exportCurrentTranscript);
@@ -1842,6 +2312,48 @@
             renderConsultation();
             renderHistory();
             showToast('Tag deleted.', 'success');
+          }
+        });
+        refs.addDocumentTemplateBtn.addEventListener('click', () => {
+          const name = normaliseWhitespace(refs.newDocumentTemplateName.value);
+          const instructions = String(refs.newDocumentTemplateInstructions.value || '').trim();
+          if (!name || !instructions) { showToast('Add both a document type name and instructions.', 'warning'); return; }
+          state.customisation.documentTemplates.unshift({ id: uid('doctype'), name, instructions });
+          refs.newDocumentTemplateName.value = '';
+          refs.newDocumentTemplateInstructions.value = '';
+          saveCustomisation();
+          renderCustomisationForm();
+          renderConsultationDocuments();
+          renderDocumentsTab();
+          showToast('Document type added.', 'success');
+        });
+        refs.documentTemplateList.addEventListener('click', (event) => {
+          const button = event.target.closest('[data-action]');
+          if (!button) return;
+          const action = button.dataset.action;
+          const templateId = button.dataset.documentTemplateId;
+          const item = button.closest('[data-document-template-id]');
+          const templateIndex = state.customisation.documentTemplates.findIndex((template) => template.id === templateId);
+          if (templateIndex === -1) return;
+          if (action === 'save-document-template' && item) {
+            const name = normaliseWhitespace(item.querySelector('.document-template-name').value);
+            const instructions = String(item.querySelector('.document-template-instructions').value || '').trim();
+            if (!name || !instructions) { showToast('Document type name and instructions cannot be empty.', 'warning'); return; }
+            state.customisation.documentTemplates[templateIndex].name = name;
+            state.customisation.documentTemplates[templateIndex].instructions = instructions;
+            saveCustomisation();
+            renderCustomisationForm();
+            renderConsultationDocuments();
+            renderDocumentsTab();
+            showToast('Document template updated.', 'success');
+          }
+          if (action === 'delete-document-template') {
+            state.customisation.documentTemplates.splice(templateIndex, 1);
+            saveCustomisation();
+            renderCustomisationForm();
+            renderConsultationDocuments();
+            renderDocumentsTab();
+            showToast('Document template deleted.', 'success');
           }
         });
         window.addEventListener('beforeunload', () => { if (state.activeSession) { syncActiveSessionFromForm(); persistSessions(); } });
