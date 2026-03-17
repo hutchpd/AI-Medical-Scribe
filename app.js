@@ -304,7 +304,8 @@
           dataRetentionDays: 180,
           transcriptFontSize: 16,
           transcriptLineSpacing: 1.55,
-          summaryPrompt: createDefaultSummaryPrompt()
+          summaryPrompt: createDefaultSummaryPrompt(),
+          splashDismissedAt: null
         };
       }
 
@@ -313,6 +314,7 @@
           organisationName: 'Findon Software',
           brandingColor: '#2f7df6',
           defaultConsultationType: 'General consultation',
+          defaultPractitionerName: '',
           macros: [
             { id: uid('macro'), label: 'Safety-netting', text: 'Safety-netting advice provided. Red flags discussed and patient aware of when to seek urgent review.' },
             { id: uid('macro'), label: 'Follow-up', text: 'Follow-up arranged with appropriate timeframe and patient advised regarding next steps.' }
@@ -440,6 +442,7 @@
         merged.interimResults = Boolean(merged.interimResults);
         merged.saveRawTranscript = Boolean(merged.saveRawTranscript);
         merged.summaryPrompt = String(merged.summaryPrompt || '').trim() || createDefaultSummaryPrompt();
+        merged.splashDismissedAt = typeof merged.splashDismissedAt === 'number' ? merged.splashDismissedAt : null;
         return merged;
       }
 
@@ -454,6 +457,7 @@
         merged.organisationName = normaliseWhitespace(merged.organisationName) || base.organisationName;
         merged.brandingColor = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(merged.brandingColor || '') ? merged.brandingColor : base.brandingColor;
         merged.defaultConsultationType = normaliseWhitespace(merged.defaultConsultationType) || base.defaultConsultationType;
+        merged.defaultPractitionerName = normaliseWhitespace(merged.defaultPractitionerName || '');
         merged.macros = Array.isArray(saved && saved.macros) ? saved.macros.map((macro) => ({ id: macro.id || uid('macro'), label: normaliseWhitespace(macro.label) || 'Snippet', text: String(macro.text || '') })) : base.macros;
         merged.customTags = dedupeStrings(Array.isArray(saved && saved.customTags) ? saved.customTags : base.customTags);
         merged.documentTemplates = Array.isArray(saved && saved.documentTemplates)
@@ -521,6 +525,14 @@
         historySelectedAssetId: 'summary',
         selectedDocumentId: null,
         documentGenerationRequest: null,
+        showSplash: false,
+        showApiHelpModal: false,
+        capabilityCheckToken: null,
+        apiCapabilityStatus: {
+          speech: { availability: stateSupports('webkitSpeechRecognition' in window), detail: '' },
+          prompt: { availability: 'checking', detail: 'Checking browser support...' },
+          summarizer: { availability: 'checking', detail: 'Checking browser support...' }
+        },
         timerIntervalId: null,
         autoSaveIntervalId: null,
         speechProvider: null,
@@ -538,6 +550,15 @@
         patientName: $('patientName'),
         clinicianName: $('clinicianName'),
         consultationType: $('consultationType'),
+        splashOverlay: $('splashOverlay'),
+        splashOrganisationName: $('splashOrganisationName'),
+        splashPractitionerName: $('splashPractitionerName'),
+        splashApiStatusList: $('splashApiStatusList'),
+        openApiHelpBtn: $('openApiHelpBtn'),
+        refreshSplashStatusBtn: $('refreshSplashStatusBtn'),
+        continueFromSplashBtn: $('continueFromSplashBtn'),
+        apiHelpModal: $('apiHelpModal'),
+        closeApiHelpBtn: $('closeApiHelpBtn'),
         manualNotes: $('manualNotes'),
         statusPill: $('statusPill'),
         sessionTimer: $('sessionTimer'),
@@ -608,8 +629,10 @@
         customBrandColor: $('customBrandColor'),
         customBrandColorValue: $('customBrandColorValue'),
         customDefaultConsultationType: $('customDefaultConsultationType'),
+        customDefaultPractitionerName: $('customDefaultPractitionerName'),
         brandPreviewTitle: $('brandPreviewTitle'),
         brandPreview: $('brandPreview'),
+        reopenSplashBtn: $('reopenSplashBtn'),
         newMacroLabel: $('newMacroLabel'),
         newMacroText: $('newMacroText'),
         addMacroBtn: $('addMacroBtn'),
@@ -727,7 +750,178 @@
         }
       }
 
+      function stateSupports(value) {
+        return value ? 'available' : 'unavailable';
+      }
+
       function findSession(sessionId) { return state.sessions.find((session) => session.id === sessionId) || null; }
+
+      function getDefaultPractitionerName() {
+        return normaliseWhitespace(state.customisation.defaultPractitionerName || '');
+      }
+
+      function getPromptApiAvailabilityLabel(value) {
+        const labels = {
+          available: 'Available',
+          downloadable: 'Not ready yet',
+          downloading: 'Downloading model',
+          unavailable: 'Unavailable',
+          'checking': 'Checking',
+          'availability-check-failed': 'Check failed'
+        };
+        return labels[value] || 'Unavailable';
+      }
+
+      function getCapabilityStatusItems() {
+        return [
+          {
+            key: 'speech',
+            title: 'Speech recognition',
+            description: 'Live consultation transcription in Chrome.',
+            availability: state.apiCapabilityStatus.speech.availability,
+            detail: state.apiCapabilityStatus.speech.detail || (state.supportsSpeech ? 'Speech recognition is available in this browser.' : 'Chrome speech recognition was not detected in this browser.')
+          },
+          {
+            key: 'prompt',
+            title: 'Prompt API',
+            description: 'Primary engine for summaries and document drafting.',
+            availability: state.apiCapabilityStatus.prompt.availability,
+            detail: state.apiCapabilityStatus.prompt.detail
+          },
+          {
+            key: 'summarizer',
+            title: 'Summarizer API',
+            description: 'Fallback summary engine when Prompt API is unavailable.',
+            availability: state.apiCapabilityStatus.summarizer.availability,
+            detail: state.apiCapabilityStatus.summarizer.detail
+          }
+        ];
+      }
+
+      function getCapabilityIndicator(availability) {
+        if (availability === 'available') return '✅';
+        if (availability === 'checking') return '⏳';
+        return '❌';
+      }
+
+      function renderSplashScreen() {
+        if (!refs.splashOverlay) return;
+        refs.splashOrganisationName.value = state.customisation.organisationName === 'Findon Software' ? '' : (state.customisation.organisationName || '');
+        refs.splashPractitionerName.value = getDefaultPractitionerName();
+        refs.splashApiStatusList.innerHTML = getCapabilityStatusItems().map((item) => {
+          const availability = item.availability || 'unavailable';
+          const statusClass = availability === 'available' ? 'available' : (availability === 'checking' ? 'pending' : 'unavailable');
+          return '<div class="api-status-item ' + statusClass + '"><div class="api-status-icon" aria-hidden="true">' + getCapabilityIndicator(availability) + '</div><div><h4>' + escapeHtml(item.title) + '</h4><div><span class="api-status-label">' + escapeHtml(getPromptApiAvailabilityLabel(availability)) + '</span><span class="api-status-detail">' + escapeHtml(item.detail || item.description) + '</span></div></div></div>';
+        }).join('');
+        refs.splashOverlay.classList.toggle('hidden', !state.showSplash);
+        refs.apiHelpModal.classList.toggle('hidden', !state.showApiHelpModal);
+      }
+
+      function openSplashScreen() {
+        state.showSplash = true;
+        renderSplashScreen();
+        refreshApiCapabilityChecks();
+      }
+
+      function closeSplashScreen() {
+        state.showSplash = false;
+        renderSplashScreen();
+      }
+
+      function openApiHelpModal() {
+        state.showApiHelpModal = true;
+        renderSplashScreen();
+      }
+
+      function closeApiHelpModal() {
+        state.showApiHelpModal = false;
+        renderSplashScreen();
+      }
+
+      async function refreshApiCapabilityChecks() {
+        const requestToken = uid('capability');
+        state.capabilityCheckToken = requestToken;
+        state.apiCapabilityStatus.speech = {
+          availability: stateSupports(state.supportsSpeech),
+          detail: state.supportsSpeech ? 'Speech recognition is available in this browser.' : 'Speech recognition is not available. Open the app in Chrome to use live transcription.'
+        };
+        state.apiCapabilityStatus.prompt = { availability: 'checking', detail: 'Checking Prompt API availability...' };
+        state.apiCapabilityStatus.summarizer = { availability: 'checking', detail: 'Checking Summarizer API availability...' };
+        renderSplashScreen();
+
+        if (hasPromptApiSupport()) {
+          try {
+            const availability = await LanguageModel.availability(getPromptApiOptions());
+            if (state.capabilityCheckToken !== requestToken) return;
+            state.apiCapabilityStatus.prompt = {
+              availability: availability,
+              detail: availability === 'available'
+                ? 'Prompt API is ready for on-device document drafting and SOAP summaries.'
+                : ('Prompt API was detected, but it is currently ' + availability + '.')
+            };
+          } catch (error) {
+            if (state.capabilityCheckToken !== requestToken) return;
+            state.apiCapabilityStatus.prompt = {
+              availability: 'availability-check-failed',
+              detail: 'Prompt API was detected, but the availability check failed in this browser build.'
+            };
+          }
+        } else {
+          state.apiCapabilityStatus.prompt = {
+            availability: 'unavailable',
+            detail: 'Prompt API was not detected in this browser.'
+          };
+        }
+
+        if (hasSummarizerSupport()) {
+          try {
+            const availability = typeof Summarizer.availability === 'function' ? await Summarizer.availability() : 'available';
+            if (state.capabilityCheckToken !== requestToken) return;
+            state.apiCapabilityStatus.summarizer = {
+              availability: availability === 'available' ? 'available' : String(availability || 'unavailable'),
+              detail: availability === 'available'
+                ? 'Summarizer API is available as a fallback for summary generation.'
+                : ('Summarizer API was detected, but it is currently ' + availability + '.')
+            };
+          } catch (error) {
+            if (state.capabilityCheckToken !== requestToken) return;
+            state.apiCapabilityStatus.summarizer = {
+              availability: 'availability-check-failed',
+              detail: 'Summarizer API was detected, but the availability check failed in this browser build.'
+            };
+          }
+        } else {
+          state.apiCapabilityStatus.summarizer = {
+            availability: 'unavailable',
+            detail: 'Summarizer API was not detected in this browser.'
+          };
+        }
+
+        if (state.capabilityCheckToken === requestToken) renderSplashScreen();
+      }
+
+      function saveSplashProfileAndContinue() {
+        const organisationName = normaliseWhitespace(refs.splashOrganisationName.value);
+        const practitionerName = normaliseWhitespace(refs.splashPractitionerName.value);
+        const previousPractitioner = getDefaultPractitionerName();
+        const previousOrganisation = state.customisation.organisationName;
+
+        if (organisationName) state.customisation.organisationName = organisationName;
+        state.customisation.defaultPractitionerName = practitionerName;
+        state.settings.splashDismissedAt = Date.now();
+        saveCustomisation();
+        saveSettings();
+
+        if (!state.activeSession) {
+          if (!refs.clinicianName.value || refs.clinicianName.value === previousPractitioner) refs.clinicianName.value = practitionerName;
+          if ((!refs.consultationOrgName.textContent || refs.consultationOrgName.textContent === previousOrganisation) && organisationName) refs.consultationOrgName.textContent = organisationName;
+        }
+
+        renderCustomisationForm();
+        renderConsultation();
+        renderSettingsForm();
+        closeSplashScreen();
+      }
 
       function getSummaryPromptValue() {
         return String(state.settings.summaryPrompt || '').trim() || createDefaultSummaryPrompt();
@@ -1579,14 +1773,14 @@
       function populateConsultationForm(session) {
         const source = session || null;
         refs.patientName.value = source ? source.patientName || '' : '';
-        refs.clinicianName.value = source ? source.clinicianName || '' : '';
+        refs.clinicianName.value = source ? source.clinicianName || getDefaultPractitionerName() : getDefaultPractitionerName();
         refs.consultationType.value = source ? (source.consultationType || state.customisation.defaultConsultationType || '') : (state.customisation.defaultConsultationType || '');
         refs.manualNotes.value = source ? (source.manualNotes || '') : '';
         state.consultationDraftTags = source ? (source.tags || []).slice() : [];
       }
 
       function resetConsultationDraft(keepIdentityFields = false) {
-        if (!keepIdentityFields) { refs.patientName.value = ''; refs.clinicianName.value = ''; }
+        if (!keepIdentityFields) { refs.patientName.value = ''; refs.clinicianName.value = getDefaultPractitionerName(); }
         refs.consultationType.value = state.customisation.defaultConsultationType || '';
         refs.manualNotes.value = '';
         refs.transcriptSearch.value = '';
@@ -2037,6 +2231,7 @@
         refs.customBrandColor.value = state.customisation.brandingColor || '#2f7df6';
         refs.customBrandColorValue.textContent = (state.customisation.brandingColor || '#2f7df6').toUpperCase();
         refs.customDefaultConsultationType.value = state.customisation.defaultConsultationType || '';
+        refs.customDefaultPractitionerName.value = getDefaultPractitionerName();
         applyThemeAndBranding();
         renderMacroEditor();
         renderCustomTagEditor();
@@ -2496,6 +2691,23 @@
           if (!state.activeSession && (!refs.consultationType.value || refs.consultationType.value === previousDefault)) refs.consultationType.value = state.customisation.defaultConsultationType;
           saveCustomisation();
         });
+        refs.customDefaultPractitionerName.addEventListener('input', () => {
+          const previousDefault = getDefaultPractitionerName();
+          state.customisation.defaultPractitionerName = normaliseWhitespace(refs.customDefaultPractitionerName.value);
+          if (!state.activeSession && (!refs.clinicianName.value || refs.clinicianName.value === previousDefault)) refs.clinicianName.value = state.customisation.defaultPractitionerName;
+          saveCustomisation();
+        });
+        refs.refreshSplashStatusBtn.addEventListener('click', () => { refreshApiCapabilityChecks(); });
+        refs.continueFromSplashBtn.addEventListener('click', () => { saveSplashProfileAndContinue(); });
+        refs.openApiHelpBtn.addEventListener('click', () => { openApiHelpModal(); });
+        refs.closeApiHelpBtn.addEventListener('click', () => { closeApiHelpModal(); });
+        refs.reopenSplashBtn.addEventListener('click', () => { openSplashScreen(); });
+        refs.apiHelpModal.addEventListener('click', (event) => {
+          if (event.target === refs.apiHelpModal) closeApiHelpModal();
+        });
+        refs.splashOverlay.addEventListener('click', (event) => {
+          if (event.target === refs.splashOverlay && state.settings.splashDismissedAt) closeSplashScreen();
+        });
         refs.addMacroBtn.addEventListener('click', () => {
           const label = normaliseWhitespace(refs.newMacroLabel.value);
           const text = String(refs.newMacroText.value || '').trim();
@@ -2656,6 +2868,7 @@
         } else {
           resetConsultationDraft();
         }
+        state.showSplash = !state.settings.splashDismissedAt;
       }
 
       function init() {
@@ -2670,6 +2883,8 @@
         renderHistory();
         resetAutoSaveInterval();
         attachEventListeners();
+        renderSplashScreen();
+        refreshApiCapabilityChecks();
         if (state.activeSession && state.activeSession.status === 'listening' && state.activeSession.lastStartedSegmentAt) ensureTimerRunning();
         if (removedCount > 0) showToast('Removed ' + removedCount + ' old session' + (removedCount === 1 ? '' : 's') + ' based on retention settings.', 'warning', 4200);
       }

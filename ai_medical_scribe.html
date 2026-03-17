@@ -8,6 +8,74 @@
 </head>
 <body>
   <div class="app-shell">
+    <div class="splash-overlay hidden" id="splashOverlay" role="dialog" aria-modal="true" aria-labelledby="splashTitle">
+      <div class="splash-panel">
+        <div class="splash-hero">
+          <p class="eyebrow">Welcome</p>
+          <h2 id="splashTitle">AI Medical Scribe runs locally in your browser</h2>
+          <p class="splash-copy">This app is a browser-based medical scribe prototype for transcription, SOAP summaries, and draft document generation. Session data stays on this computer, with no backend controlled by this project. The project is open source on <a href="https://github.com/hutchpd/AI-Medical-Scribe" target="_blank" rel="noreferrer">GitHub</a> and is built by <a href="https://findonsoftware.com/" target="_blank" rel="noreferrer">Findon Software</a>.</p>
+        </div>
+
+        <div class="splash-grid">
+          <section class="splash-card">
+            <h3>Quick setup</h3>
+            <p class="subtle-note">These values are used to prefill document generation and consultation details. Both can be left blank and edited later.</p>
+            <div class="field" style="margin-bottom: 12px;">
+              <label for="splashOrganisationName">Organisation name</label>
+              <input id="splashOrganisationName" type="text" placeholder="e.g. Findon Medical" />
+            </div>
+            <div class="field">
+              <label for="splashPractitionerName">Practitioner's name</label>
+              <input id="splashPractitionerName" type="text" placeholder="e.g. Dr Patel" />
+            </div>
+          </section>
+
+          <section class="splash-card">
+            <div class="card-header" style="margin-bottom: 10px;">
+              <div>
+                <h3>Browser capability check</h3>
+                <div class="subtle-note">This app works best in recent Chrome builds with built-in AI enabled.</div>
+              </div>
+              <button class="link-button" id="openApiHelpBtn" type="button">How do I enable these?</button>
+            </div>
+            <div class="api-status-list" id="splashApiStatusList"></div>
+          </section>
+        </div>
+
+        <div class="splash-footer">
+          <p class="subtle-note">If browser AI is not ready yet, you can still use manual notes, session history, and local editing while Chrome downloads or enables the required model support.</p>
+          <div class="inline-actions">
+            <button class="btn" id="refreshSplashStatusBtn" type="button">Refresh checks</button>
+            <button class="btn primary" id="continueFromSplashBtn" type="button">Continue to app</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-backdrop hidden" id="apiHelpModal" role="dialog" aria-modal="true" aria-labelledby="apiHelpModalTitle">
+      <div class="modal-panel">
+        <div class="card-header">
+          <div>
+            <p class="eyebrow">Setup help</p>
+            <h3 id="apiHelpModalTitle">Enable Chrome built-in AI features</h3>
+          </div>
+          <button class="btn small" id="closeApiHelpBtn" type="button">Close</button>
+        </div>
+        <div class="modal-copy">
+          <p>This prototype is designed for recent Chrome builds, usually served on <strong>localhost</strong>. For the best results, use Chrome Canary or a recent Chrome build with built-in AI flags enabled.</p>
+          <ol class="modal-list">
+            <li>Serve the app on <strong>http://localhost</strong> rather than opening the file directly.</li>
+            <li>Open <strong>chrome://flags</strong>.</li>
+            <li>Enable <strong>chrome://flags/#optimization-guide-on-device-model</strong>.</li>
+            <li>Enable the Prompt API flag available in your build, such as <strong>chrome://flags/#prompt-api-for-gemini-nano</strong> or <strong>chrome://flags/#prompt-api-for-gemini-nano-multimodal-input</strong>.</li>
+            <li>Relaunch Chrome and allow the on-device model to download if prompted.</li>
+          </ol>
+          <p>You can inspect readiness in DevTools with <strong>LanguageModel.availability(...)</strong>, and review <strong>chrome://on-device-internals</strong> or <strong>chrome://components</strong> if the model never becomes ready.</p>
+          <p>The README in this project contains the same setup notes in more detail.</p>
+        </div>
+      </div>
+    </div>
+
     <header class="topbar">
       <div class="brand">
         <div class="brand-mark" aria-hidden="true"></div>
@@ -379,6 +447,9 @@
                 <p style="margin-top: 0;">This front-end uses the browser's speech recognition engine when available. The recognition provider is isolated in JavaScript so it can be replaced with another provider later.</p>
                 <p style="margin-bottom: 0;">Only one session is treated as active at a time. All session data remains in-browser with no backend calls.</p>
               </div>
+              <div style="margin-top: 14px;">
+                <button class="btn small" id="reopenSplashBtn" type="button">Open welcome screen</button>
+              </div>
             </div>
           </div>
 
@@ -419,6 +490,10 @@
             <div class="field" style="margin-bottom: 14px;">
               <label for="customDefaultConsultationType">Default consultation type</label>
               <input id="customDefaultConsultationType" type="text" placeholder="General consultation" />
+            </div>
+            <div class="field" style="margin-bottom: 14px;">
+              <label for="customDefaultPractitionerName">Default practitioner's name</label>
+              <input id="customDefaultPractitionerName" type="text" placeholder="e.g. Dr Patel" />
             </div>
             <div class="field" style="margin-bottom: 14px;">
               <span class="label">Branding colour</span>
