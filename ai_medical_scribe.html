@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Medical Scribe</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"></div>
+        <div class="brand-copy">
+          <p class="eyebrow" id="orgDisplay">Northbridge Clinic</p>
+          <h1>AI Medical Scribe</h1>
+        </div>
+      </div>
+      <nav class="tabs" aria-label="Primary navigation">
+        <button class="nav-tab active" data-tab="consultation" type="button">Consultation</button>
+        <button class="nav-tab" data-tab="history" type="button">History</button>
+        <button class="nav-tab" data-tab="settings" type="button">Settings</button>
+        <button class="nav-tab" data-tab="customisation" type="button">Customisation</button>
+      </nav>
+    </header>
+
+    <main class="content">
+      <section class="tab-section active" id="section-consultation">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">Live consultation workflow</p>
+            <h2>Capture, annotate, and save the current encounter</h2>
+            <p>Real-time transcription, manual notes, important markers, transcript search, and local session persistence.</p>
+          </div>
+          <div class="status-and-timer">
+            <span class="status-pill idle" id="statusPill">Idle</span>
+            <div class="timer-card" aria-live="polite">
+              <span>Session timer</span>
+              <strong id="sessionTimer">00:00:00</strong>
+            </div>
+          </div>
+        </div>
+
+        <div class="support-banner" id="speechSupportMessage" role="alert"></div>
+
+        <div class="card form-grid">
+          <div class="field">
+            <label for="patientName">Patient Name</label>
+            <input id="patientName" type="text" placeholder="e.g. Alex Morgan" />
+          </div>
+          <div class="field">
+            <label for="clinicianName">Clinician Name</label>
+            <input id="clinicianName" type="text" placeholder="e.g. Dr Patel" />
+          </div>
+          <div class="field">
+            <label for="consultationType">Consultation Type</label>
+            <input id="consultationType" type="text" placeholder="e.g. General consultation" />
+          </div>
+          <div class="field">
+            <span class="label">Organisation</span>
+            <div class="readonly-chip" id="consultationOrgName">Northbridge Clinic</div>
+          </div>
+        </div>
+
+        <div class="card controls-bar">
+          <div class="controls-group">
+            <button class="btn primary" id="startBtn" type="button">Start Listening</button>
+            <button class="btn danger" id="stopBtn" type="button">Stop</button>
+            <button class="btn warning" id="pauseBtn" type="button">Pause</button>
+            <button class="btn success" id="resumeBtn" type="button">Resume</button>
+          </div>
+          <div class="actions-group">
+            <button class="btn" id="markImportantBtn" type="button">Mark Important Moment</button>
+            <button class="btn ghost" id="saveSessionBtn" type="button">Save Session</button>
+          </div>
+        </div>
+
+        <div class="consultation-grid">
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h3>Transcript</h3>
+                <div class="subtle-note" id="transcriptEditHint">Transcript becomes editable after you stop the session.</div>
+              </div>
+              <div class="search-actions">
+                <input class="search-input" id="transcriptSearch" type="search" placeholder="Search or highlight transcript..." />
+                <button class="btn small" id="copyTranscriptBtn" type="button">Copy Transcript</button>
+                <button class="btn small" id="exportTranscriptBtn" type="button">Export .txt</button>
+              </div>
+            </div>
+
+            <div class="transcript-container" id="transcriptContainer" aria-live="polite"></div>
+            <div class="interim-container hidden" id="interimContainer">
+              <span class="interim-label">Interim transcript</span>
+              <div id="interimText"></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h3>Manual Notes</h3>
+                <div class="subtle-note" id="activeSessionStateText">Capture notes during the consultation. Sessions auto-save to local storage.</div>
+              </div>
+            </div>
+
+            <div class="field" style="margin-bottom: 12px;">
+              <span class="label">Reusable snippets</span>
+              <div class="macro-bar" id="macroBar"></div>
+            </div>
+
+            <div class="field">
+              <label for="manualNotes">Session notes</label>
+              <textarea id="manualNotes" class="manual-notes" placeholder="Type observations, instructions, actions, or follow-up points here..."></textarea>
+            </div>
+
+            <div class="field" style="margin-top: 14px;">
+              <span class="label">Session tags</span>
+              <div class="tag-selector" id="tagSelector"></div>
+            </div>
+
+            <div class="notes-footer">
+              <span class="subtle-note" id="lastSavedLabel">Not yet saved</span>
+              <span class="subtle-note" id="sessionSummaryLabel">No active session</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab-section" id="section-history">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">Saved sessions</p>
+            <h2>Review, edit, duplicate, archive, or remove previous consultations</h2>
+            <p>All history is stored locally in this browser.</p>
+          </div>
+          <div class="status-and-timer">
+            <div class="timer-card" style="min-width: 200px;">
+              <span>Displayed sessions</span>
+              <strong id="historyCount">0</strong>
+            </div>
+          </div>
+        </div>
+
+        <div class="card filter-grid">
+          <div class="field">
+            <label for="historyPatientFilter">Filter by patient</label>
+            <input id="historyPatientFilter" type="text" placeholder="Patient name" />
+          </div>
+          <div class="field">
+            <label for="historyClinicianFilter">Filter by clinician</label>
+            <input id="historyClinicianFilter" type="text" placeholder="Clinician name" />
+          </div>
+          <div class="field">
+            <label for="historyDateFilter">Filter by date</label>
+            <input id="historyDateFilter" type="date" />
+          </div>
+          <div class="field">
+            <span class="label">Archived sessions</span>
+            <div class="toggle-wrap readonly-chip">
+              <span>Hide archived items</span>
+              <label class="switch" aria-label="Hide archived sessions">
+                <input id="historyHideArchived" type="checkbox" checked />
+                <span class="slider"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="history-grid">
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h3>Session list</h3>
+                <div class="subtle-note">Most recent sessions appear first.</div>
+              </div>
+            </div>
+            <div class="session-list" id="sessionList"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h3>Session detail</h3>
+                <div class="subtle-note" id="historyDetailHint">Select a session to review transcript and notes.</div>
+              </div>
+              <div class="inline-actions">
+                <button class="btn small" id="historyEditToggle" type="button">Edit Mode</button>
+                <button class="btn small" id="historySaveBtn" type="button">Save Changes</button>
+              </div>
+            </div>
+            <div class="history-detail" id="historyDetail">
+              <div class="empty-state">Select a session from the list to open its transcript and notes.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab-section" id="section-settings">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">System settings</p>
+            <h2>Recognition, retention, and transcript display preferences</h2>
+            <p>Changes are applied immediately and stored in local storage.</p>
+          </div>
+        </div>
+
+        <div class="settings-grid">
+          <div class="card settings-card">
+            <div class="setting-group">
+              <h3>Speech recognition</h3>
+              <div class="setting-row">
+                <label class="label" for="settingLocale">Speech locale</label>
+                <select id="settingLocale">
+                  <option value="en-GB">English (UK)</option>
+                  <option value="en-US">English (US)</option>
+                  <option value="en-AU">English (Australia)</option>
+                  <option value="en-IE">English (Ireland)</option>
+                  <option value="fr-FR">French (France)</option>
+                  <option value="de-DE">German (Germany)</option>
+                </select>
+              </div>
+              <div class="setting-row">
+                <div class="toggle-wrap">
+                  <span>Auto punctuation</span>
+                  <label class="switch"><input id="settingAutoPunctuation" type="checkbox" /><span class="slider"></span></label>
+                </div>
+                <div class="subtle-note">Adds light punctuation and sentence casing when final results arrive.</div>
+              </div>
+              <div class="setting-row">
+                <div class="toggle-wrap">
+                  <span>Interim results</span>
+                  <label class="switch"><input id="settingInterimResults" type="checkbox" /><span class="slider"></span></label>
+                </div>
+                <div class="subtle-note">Show partially recognised speech while listening.</div>
+              </div>
+              <div class="setting-row">
+                <div class="toggle-wrap">
+                  <span>Save raw transcript</span>
+                  <label class="switch"><input id="settingSaveRawTranscript" type="checkbox" /><span class="slider"></span></label>
+                </div>
+                <div class="subtle-note">Retains the unformatted text alongside each final transcript segment.</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card settings-card">
+            <div class="setting-group">
+              <h3>Storage and retention</h3>
+              <div class="setting-row">
+                <div class="setting-inline">
+                  <label class="label" for="settingAutoSaveInterval">Auto-save interval</label>
+                  <span class="range-value" id="settingAutoSaveIntervalValue">5s</span>
+                </div>
+                <input id="settingAutoSaveInterval" type="range" min="1" max="30" step="1" />
+                <div class="subtle-note">Active sessions persist automatically at this interval.</div>
+              </div>
+              <div class="setting-row">
+                <label class="label" for="settingDataRetentionDays">Data retention (days)</label>
+                <input id="settingDataRetentionDays" type="number" min="0" step="1" />
+                <div class="subtle-note">Sessions older than this are deleted on load and when the setting changes. Use 0 to disable.</div>
+              </div>
+              <div class="setting-row">
+                <label class="label" for="settingTheme">Theme</label>
+                <select id="settingTheme">
+                  <option value="light">Light</option>
+                  <option value="dark">Dark</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="card settings-card">
+            <div class="setting-group">
+              <h3>Transcript display</h3>
+              <div class="setting-row">
+                <div class="setting-inline">
+                  <label class="label" for="settingTranscriptFontSize">Font size</label>
+                  <span class="range-value" id="settingTranscriptFontSizeValue">16px</span>
+                </div>
+                <input id="settingTranscriptFontSize" type="range" min="14" max="24" step="1" />
+              </div>
+              <div class="setting-row">
+                <div class="setting-inline">
+                  <label class="label" for="settingLineSpacing">Line spacing</label>
+                  <span class="range-value" id="settingLineSpacingValue">1.55</span>
+                </div>
+                <input id="settingLineSpacing" type="range" min="1.2" max="2" step="0.05" />
+              </div>
+              <div class="setting-row">
+                <div class="subtle-note">Font size and line spacing apply to consultation and history transcript views immediately.</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card settings-card">
+            <div class="setting-group">
+              <h3>Behaviour notes</h3>
+              <div class="subtle-note">
+                <p style="margin-top: 0;">This front-end uses the browser's speech recognition engine when available. The recognition provider is isolated in JavaScript so it can be replaced with another provider later.</p>
+                <p style="margin-bottom: 0;">Only one session is treated as active at a time. All session data remains in-browser with no backend calls.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="tab-section" id="section-customisation">
+        <div class="section-header">
+          <div>
+            <p class="eyebrow">Organisation customisation</p>
+            <h2>Branding, default consultation settings, reusable snippets, and custom tags</h2>
+            <p>These settings update the interface immediately and persist locally.</p>
+          </div>
+        </div>
+
+        <div class="custom-grid">
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h3>Brand and defaults</h3>
+                <div class="subtle-note">Control the organisation name, accent colour, and default consultation type.</div>
+              </div>
+            </div>
+            <div class="field" style="margin-bottom: 14px;">
+              <label for="customOrgName">Clinic / organisation name</label>
+              <input id="customOrgName" type="text" placeholder="Organisation name" />
+            </div>
+            <div class="field" style="margin-bottom: 14px;">
+              <label for="customDefaultConsultationType">Default consultation type</label>
+              <input id="customDefaultConsultationType" type="text" placeholder="General consultation" />
+            </div>
+            <div class="field" style="margin-bottom: 14px;">
+              <span class="label">Branding colour</span>
+              <div class="color-row">
+                <input id="customBrandColor" class="color-input" type="color" />
+                <div class="readonly-chip" id="customBrandColorValue">#2F7DF6</div>
+              </div>
+            </div>
+            <div class="brand-preview" id="brandPreview">
+              <div class="eyebrow">Preview</div>
+              <h3 style="margin: 6px 0 8px; display: flex; align-items: center;"><span class="brand-swatch"></span><span id="brandPreviewTitle">Northbridge Clinic</span></h3>
+              <div class="subtle-note">The accent colour is used for controls, badges, highlights, and transcript markers.</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h3>Reusable snippets / macros</h3>
+                <div class="subtle-note">Insert frequently used text directly into the manual notes panel.</div>
+              </div>
+            </div>
+            <div class="field" style="margin-bottom: 12px;">
+              <label for="newMacroLabel">New snippet label</label>
+              <input id="newMacroLabel" type="text" placeholder="e.g. Safety-netting" />
+            </div>
+            <div class="field" style="margin-bottom: 12px;">
+              <label for="newMacroText">Snippet text</label>
+              <textarea id="newMacroText" class="textarea" rows="4" placeholder="Enter reusable text..."></textarea>
+            </div>
+            <button class="btn primary" id="addMacroBtn" type="button">Add Snippet</button>
+            <div style="height: 12px;"></div>
+            <div class="list-editor" id="macroList"></div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h3>Custom tags</h3>
+                <div class="subtle-note">Create reusable tags that can be assigned to sessions.</div>
+              </div>
+            </div>
+            <div class="field" style="margin-bottom: 12px;">
+              <label for="newCustomTag">New tag</label>
+              <input id="newCustomTag" type="text" placeholder="e.g. Urgent" />
+            </div>
+            <button class="btn primary" id="addCustomTagBtn" type="button">Add Tag</button>
+            <div style="height: 12px;"></div>
+            <div class="list-editor" id="customTagList"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div class="toast-container" id="toastContainer" aria-live="polite" aria-atomic="true"></div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
