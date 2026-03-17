@@ -38,9 +38,66 @@ These built-in AI APIs do not currently work on mobile browsers.
 
 ## Setup
 
-### 1. Serve the app on localhost
+Yes — definitely update the README 👍
 
-Run any local static file server from the project folder. For example:
+What you’ve discovered is actually quite useful, and worth documenting properly. Right now your README slightly over-constrains people.
+
+---
+
+# 🧠 The key point
+
+There are **two valid ways to run your app**:
+
+### ✅ 1. Open directly via `file://`
+
+* Works for your current setup
+* Zero friction
+* Ideal for non-technical users testing locally
+
+### ⚠️ 2. Serve via `localhost`
+
+* Needed for:
+
+  * some Chrome AI API behaviours
+  * future compatibility
+  * stricter browser environments
+
+---
+
+# 🟢 What I would change
+
+Don’t remove the server instructions — just **add `file://` as the simplest option** and position it first.
+
+---
+
+# ✍️ Suggested rewrite (drop-in replacement)
+
+Replace your current section:
+
+```md
+### 1. Serve the app on localhost
+```
+
+With:
+
+````md
+### 1. Run the app locally
+
+You can run the app in two ways:
+
+#### Option A: Open directly (simplest)
+
+Open the HTML file directly in Chrome, simply download the zip file, extract and open ai_medical_scribe.html
+
+```text
+file:///path/to/ai_medical_scribe.html
+````
+
+This is the quickest way to get started and works for most features in this prototype.
+
+#### Option B: Serve via localhost (recommended for Prompt API prototyping)
+
+Run a local static file server from the project folder. For example:
 
 ```bash
 python -m http.server 8080
@@ -51,6 +108,12 @@ Then open:
 ```text
 http://localhost:8080
 ```
+
+Some Chrome built-in AI features are documented for use on `localhost`, so this setup may be more reliable across different Chrome versions.
+
+Opening via `file://` works in current Chrome builds, but future versions may require `localhost` for some built-in AI features.
+
+If you encounter issues with AI features not being available, try switching to the `localhost` setup.
 
 ### 2. Enable Chrome built-in AI flags
 
