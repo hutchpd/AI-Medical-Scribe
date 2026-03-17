@@ -252,7 +252,7 @@
 
       function createDefaultCustomisation() {
         return {
-          organisationName: 'Northbridge Clinic',
+          organisationName: 'Findon Software',
           brandingColor: '#2f7df6',
           defaultConsultationType: 'General consultation',
           macros: [
@@ -454,7 +454,8 @@
         autoSaveIntervalId: null,
         speechProvider: null,
         supportsSpeech: 'webkitSpeechRecognition' in window,
-        supportsAiSummary: Boolean(window.ai && typeof window.ai.createTextSession === 'function'),
+        supportsAiSummary: 'LanguageModel' in self,
+        supportsSummarizer: 'Summarizer' in self,
         summaryRequestTokens: {},
         lastPersistedAt: null
       };
@@ -676,12 +677,14 @@
         return 'idle';
       }
 
-      function closeTextSession(textSession) {
-        if (!textSession) return;
+      function hasAiSummarySupport() {
+        return Boolean(state.supportsAiSummary || state.supportsSummarizer);
+      }
+
+      function closeTextSession(session) {
+        if (!session) return;
         try {
-          if (typeof textSession.destroy === 'function') textSession.destroy();
-          else if (typeof textSession.close === 'function') textSession.close();
-          else if (typeof textSession.end === 'function') textSession.end();
+          if (typeof session.destroy === 'function') session.destroy();
         } catch (_) {}
       }
 
@@ -734,9 +737,9 @@
       function getSummaryMetaText(session) {
         if (!session) return 'Generated after stopping the session using on-device AI.';
         const status = getEffectiveSummaryStatus(session);
-        if (!state.supportsAiSummary) return 'On-device AI summarisation is unavailable in this browser.';
+        if (!hasAiSummarySupport()) return 'On-device AI summarisation is unavailable in this browser.';
         if (!hasSummarisableTranscript(session)) return 'Stop a consultation with transcript content to generate a summary.';
-        if (status === 'generating') return 'Generating summary with Gemini Nano in the browser.';
+        if (status === 'generating') return 'Generating summary with on-device browser AI.';
         if (status === 'error') return session.summaryError || 'Summary generation failed.';
         if (status === 'stale') return 'Transcript or prompt changed since the last summary was generated.';
         if (session.summaryUpdatedAt) return 'Generated ' + formatDateTime(session.summaryUpdatedAt) + ' using the current saved prompt.';
@@ -745,7 +748,7 @@
 
       function buildSummaryPanelHtml(session) {
         if (!session) return '<div class="empty-state small">Start or open a session to generate an AI summary from its transcript.</div>';
-        if (!state.supportsAiSummary) return '<div class="empty-state small">This browser does not currently expose Gemini Nano through window.ai, so summaries cannot be generated here.</div>';
+        if (!hasAiSummarySupport()) return '<div class="empty-state small">This browser does not currently expose the Prompt API or Summarizer API, so summaries cannot be generated here.</div>';
         if (!hasSummarisableTranscript(session)) return '<div class="empty-state small">No transcript content is available yet. Stop a consultation after dictation to generate the summary.</div>';
 
         const status = getEffectiveSummaryStatus(session);
@@ -759,7 +762,7 @@
       function updateSummaryButton(button, session) {
         if (!button) return;
         const status = getEffectiveSummaryStatus(session);
-        button.disabled = !session || !state.supportsAiSummary || !hasSummarisableTranscript(session) || status === 'generating';
+        button.disabled = !session || !hasAiSummarySupport() || !hasSummarisableTranscript(session) || status === 'generating';
         button.textContent = normaliseWhitespace(session ? session.summary : '') ? 'Regenerate Summary' : 'Generate Summary';
       }
 
@@ -780,7 +783,7 @@
         const force = Boolean(options.force);
         const showFeedback = options.showFeedback !== false;
 
-        if (!state.supportsAiSummary) {
+        if (!hasAiSummarySupport()) {
           if (showFeedback) showToast('On-device AI summarisation is not available in this browser.', 'warning', 4200);
           renderConsultationSummary();
           if (state.currentTab === 'history' && state.historySelectedSessionId === session.id) renderHistoryDetail();
@@ -801,15 +804,83 @@
         if (state.currentTab === 'history' && state.historySelectedSessionId === session.id) renderHistoryDetail();
 
         const finalPrompt = promptTemplate + '\n\nConsultation transcript:\n' + transcriptSource;
-        let textSession = null;
+        let sessionHandle = null;
 
         try {
-          textSession = await window.ai.createTextSession();
-          const result = await textSession.prompt(finalPrompt);
-          if (state.summaryRequestTokens[session.id] !== requestToken) return;
-
           const refreshedSession = findSession(session.id);
           if (!refreshedSession) return;
+
+          if (!('LanguageModel' in self) && 'Summarizer' in self) {
+            sessionHandle = await Summarizer.create({
+              type: 'key-points',
+              format: 'markdown',
+              length: 'medium'
+            });
+
+            const summary = await sessionHandle.summarize(transcriptSource);
+            if (state.summaryRequestTokens[session.id] !== requestToken) return;
+
+            refreshedSession.summary = String(summary || '').trim();
+            refreshedSession.summaryStatus = 'ready';
+            refreshedSession.summaryUpdatedAt = Date.now();
+            refreshedSession.summaryError = '';
+            refreshedSession.summaryPrompt = promptTemplate;
+            refreshedSession.summarySignature = transcriptSource;
+            refreshedSession.updatedAt = Date.now();
+            upsertSession(refreshedSession);
+            persistSessions();
+            if (state.activeSession && state.activeSession.id === refreshedSession.id) renderConsultationSummary();
+            if (state.currentTab === 'history' && state.historySelectedSessionId === refreshedSession.id) renderHistoryDetail();
+            if (showFeedback) showToast('Summary generated.', 'success', 2200);
+            return;
+          }
+
+          const availability = await LanguageModel.availability({
+            expectedOutputLanguage: 'en',
+            expectedOutputs: [{
+              type: "text",
+              languages: ["en"]
+            }]
+          });
+          
+          if (availability !== 'available') {
+            if ('Summarizer' in self) {
+              sessionHandle = await Summarizer.create({
+                type: 'key-points',
+                format: 'markdown',
+                length: 'medium'
+              });
+
+              const fallbackSummary = await sessionHandle.summarize(transcriptSource);
+              if (state.summaryRequestTokens[session.id] !== requestToken) return;
+
+              refreshedSession.summary = String(fallbackSummary || '').trim();
+              refreshedSession.summaryStatus = 'ready';
+              refreshedSession.summaryUpdatedAt = Date.now();
+              refreshedSession.summaryError = '';
+              refreshedSession.summaryPrompt = promptTemplate;
+              refreshedSession.summarySignature = transcriptSource;
+              refreshedSession.updatedAt = Date.now();
+              upsertSession(refreshedSession);
+              persistSessions();
+              if (state.activeSession && state.activeSession.id === refreshedSession.id) renderConsultationSummary();
+              if (state.currentTab === 'history' && state.historySelectedSessionId === refreshedSession.id) renderHistoryDetail();
+              if (showFeedback) showToast('Summary generated.', 'success', 2200);
+              return;
+            }
+            throw new Error('Language model is not available: ' + availability);
+          }
+
+          sessionHandle = await LanguageModel.create({
+            expectedOutputLanguage: 'en',
+            expectedOutputs: [{
+              type: "text",
+              languages: ["en"]
+            }]
+          });
+
+          const result = await sessionHandle.prompt(finalPrompt);
+          if (state.summaryRequestTokens[session.id] !== requestToken) return;
 
           const summaryText = String(result || '').trim();
           if (!summaryText) throw new Error('The browser returned an empty summary.');
@@ -832,7 +903,7 @@
           if (!refreshedSession) return;
           const detail = normaliseWhitespace(error && error.message ? error.message : String(error || ''));
           refreshedSession.summaryStatus = 'error';
-          refreshedSession.summaryError = detail ? ('Gemini Nano summary generation failed: ' + detail) : 'Gemini Nano summary generation failed in this browser.';
+          refreshedSession.summaryError = detail ? ('On-device summary generation failed: ' + detail) : 'On-device summary generation failed in this browser.';
           refreshedSession.updatedAt = Date.now();
           upsertSession(refreshedSession);
           persistSessions();
@@ -840,7 +911,7 @@
           if (state.currentTab === 'history' && state.historySelectedSessionId === refreshedSession.id) renderHistoryDetail();
           if (showFeedback) showToast('Summary generation failed.', 'error', 4200);
         } finally {
-          closeTextSession(textSession);
+          closeTextSession(sessionHandle);
           if (state.summaryRequestTokens[session.id] === requestToken) delete state.summaryRequestTokens[session.id];
         }
       }
@@ -1275,9 +1346,11 @@
         refs.settingLineSpacing.value = String(state.settings.transcriptLineSpacing);
         refs.settingLineSpacingValue.textContent = Number(state.settings.transcriptLineSpacing).toFixed(2);
         refs.settingSummaryPrompt.value = getSummaryPromptValue();
-        refs.settingSummaryAvailability.textContent = state.supportsAiSummary
-          ? 'Gemini Nano is available through the browser. Summaries run on-device with no API key.'
-          : 'Gemini Nano is not currently exposed through window.ai in this browser, so summary generation is unavailable here.';
+        refs.settingSummaryAvailability.textContent = hasAiSummarySupport()
+          ? (state.supportsAiSummary
+            ? 'Chrome Prompt API is available through the browser. Summaries run on-device with no API key.'
+            : 'Prompt API is unavailable, but the Summarizer API is available as a fallback.')
+          : 'Prompt API and Summarizer API are unavailable in this browser, so summary generation is unavailable here.';
       }
 
       function renderMacroEditor() {
