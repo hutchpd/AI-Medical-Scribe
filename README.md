@@ -134,8 +134,7 @@ Sessions, notes, settings, customisation, summaries, and generated documents are
 
 ## Privacy
 
-This app does not send transcript, summary, or document data to any backend controlled by this project. AI summaries and document generation use Chrome's on-device model.
-
+This app does not send transcript, summary, or document data to any backend controlled by this project. AI summaries and document generation use Chrome's on-device model and do not rely on external AI services.
 Additional notes:
 
 - Session data is stored locally in the browser.
@@ -180,8 +179,24 @@ Possible next steps for the prototype:
 - Improved session search, filtering, and document management across history.
 - Optional packaging as a local desktop wrapper or PWA for easier deployment.
 
+## Known Limitations
+
+- Depends on Chrome built-in AI APIs that are still evolving and may change.
+- Requires relatively modern hardware to run on-device models.
+- Speech recognition behaviour depends on the browser implementation.
+- Not suitable for clinical use.
+
 ## References
 
 - Chrome built-in AI getting started: https://developer.chrome.com/docs/ai/get-started
 - Chrome Prompt API: https://developer.chrome.com/docs/ai/prompt-api
 - Chrome client-side translation overview: https://developer.chrome.com/docs/ai/translate-on-device
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Disclaimer
+
+This project is provided for educational and experimental purposes only.
+It is not a medical device and must not be used for diagnosis or clinical decision-making.
