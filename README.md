@@ -4,6 +4,15 @@ AI Medical Scribe is a browser-based prototype for live consultation transcripti
 
 It is designed as a local-first front end. Session capture, notes, summaries, generated documents, settings, and customisation are all handled in the browser with no project backend.
 
+## Why
+
+Most AI medical scribes rely on cloud processing and external APIs.
+
+This project explores a different approach:
+- no backend
+- no API keys
+- no data leaving the device
+
 ## Features
 
 - Live consultation transcription using Chrome's speech recognition support.
@@ -36,52 +45,8 @@ Current Chrome documentation for Gemini Nano-based built-in AI features points t
 
 These built-in AI APIs do not currently work on mobile browsers.
 
+
 ## Setup
-
-Yes — definitely update the README 👍
-
-What you’ve discovered is actually quite useful, and worth documenting properly. Right now your README slightly over-constrains people.
-
----
-
-# 🧠 The key point
-
-There are **two valid ways to run your app**:
-
-### ✅ 1. Open directly via `file://`
-
-* Works for your current setup
-* Zero friction
-* Ideal for non-technical users testing locally
-
-### ⚠️ 2. Serve via `localhost`
-
-* Needed for:
-
-  * some Chrome AI API behaviours
-  * future compatibility
-  * stricter browser environments
-
----
-
-# 🟢 What I would change
-
-Don’t remove the server instructions — just **add `file://` as the simplest option** and position it first.
-
----
-
-# ✍️ Suggested rewrite (drop-in replacement)
-
-Replace your current section:
-
-```md
-### 1. Serve the app on localhost
-```
-
-With:
-
-````md
-### 1. Run the app locally
 
 You can run the app in two ways:
 
@@ -91,7 +56,7 @@ Open the HTML file directly in Chrome, simply download the zip file, extract and
 
 ```text
 file:///path/to/ai_medical_scribe.html
-````
+```
 
 This is the quickest way to get started and works for most features in this prototype.
 
@@ -177,6 +142,13 @@ chrome://components
 
 In some Chrome builds, `chrome://components` may show `Optimization Guide On Device Model`, which can be a useful sanity check.
 
+## Quick Demo
+
+1. Open `ai_medical_scribe.html` in Chrome
+2. Click "Start session"
+3. Speak or simulate a consultation
+4. Stop session to generate summary
+
 ## How It Works
 
 ### Transcription
@@ -230,6 +202,13 @@ Additional notes:
 
 - This prototype currently depends on Chrome speech recognition support.
 - If speech recognition is unavailable, the app can still be used for manual notes, history, local summaries from existing transcript content, and document drafting from saved sessions.
+
+## Architecture
+
+- Frontend: HTML + JavaScript
+- Transcription: Browser speech recognition
+- AI: Chrome built-in Prompt API (on-device Gemini Nano)
+- Storage: Browser local storage
 
 ## Roadmap
 
