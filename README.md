@@ -2,9 +2,9 @@
 
 ![Demo](demo.gif)
 
-AI Medical Scribe is a browser-based prototype for live consultation transcription, on-device summarisation, and document drafting.
+AI Medical Scribe is a browser-based prototype for live consultation transcription, on-device summarisation, document drafting, and client-side FHIR export.
 
-It is designed as a local-first front end. Session capture, notes, summaries, generated documents, settings, and customisation are all handled in the browser with no project backend.
+It is designed as a local-first front end. Session capture, notes, summaries, generated documents, FHIR exports, settings, and customisation are all handled in the browser with no project backend.
 
 ## Why
 
@@ -22,6 +22,7 @@ This project explores a different approach:
 - Important-moment markers inside the transcript timeline.
 - On-device AI summary generation after transcription stops.
 - Rich text document drafting from transcript content using configurable templates.
+- Client-side FHIR R4 Bundle export for the active session or a selected history session.
 - Session history with review, edit, duplicate, archive, and delete workflows.
 - Local customisation for organisation name, colour, snippets, tags, and document templates.
 - Local persistence through browser storage.
@@ -165,13 +166,25 @@ Consultation summaries are generated on-device using Chrome's Prompt API when av
 
 Document drafts are generated from the transcript using Chrome's on-device model path and stored as editable rich text HTML.
 
+### FHIR Export
+
+Sessions can be exported as a FHIR R4 JSON Bundle directly in the browser.
+
+What that means in practice:
+
+- The app can package a consultation into a structured healthcare data document rather than only plain text or HTML.
+- The export is built on demand from the current in-browser session object and downloaded as a `.json` file.
+- No backend is used and the generated FHIR is not stored separately in local storage.
+- The Bundle is document-style and includes a `Composition` as the first entry, plus the related `Encounter`, `Organization`, optional `Patient` and `Practitioner`, and `DocumentReference` resources for transcript, manual notes, and generated documents.
+- Clinical summary content is currently exported as narrative XHTML sections rather than deeply coded clinical resources. That makes it useful for interoperability experiments, testing, and downstream mapping, but it is still a prototype export rather than a production clinical integration.
+
 ### Storage
 
-Sessions, notes, settings, customisation, summaries, and generated documents are persisted in browser local storage only.
+Sessions, notes, settings, customisation, summaries, and generated documents are persisted in browser local storage only. FHIR exports are generated on demand for download and are not persisted by the app unless the user chooses to keep the downloaded file.
 
 ## Privacy
 
-This app does not send transcript, summary, or document data to any backend controlled by this project. AI summaries and document generation use Chrome's on-device model and do not rely on external AI services.
+This app does not send transcript, summary, document, or FHIR export data to any backend controlled by this project. AI summaries and document generation use Chrome's on-device model and do not rely on external AI services.
 Additional notes:
 
 - Session data is stored locally in the browser.
@@ -210,6 +223,7 @@ Additional notes:
 - Frontend: HTML + JavaScript
 - Transcription: Browser speech recognition
 - AI: Chrome built-in Prompt API (on-device Gemini Nano)
+- Interoperability export: Client-side FHIR R4 JSON Bundle generation
 - Storage: Browser local storage
 
 ## Roadmap
@@ -218,7 +232,7 @@ Possible next steps for the prototype:
 
 - Better surfacing of model download and readiness state in the UI.
 - More document templates and template versioning.
-- Structured export formats in addition to plain text and HTML.
+- Additional interoperability exports beyond the current plain text, HTML, and FHIR JSON outputs.
 - Clearer browser capability diagnostics for transcription, Prompt API, and Summarizer fallback.
 - Improved session search, filtering, and document management across history.
 - Optional packaging as a local desktop wrapper or PWA for easier deployment.

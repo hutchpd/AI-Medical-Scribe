@@ -9,6 +9,19 @@
         customisation: 'ai_medical_scribe_customisation_v1'
       };
 
+      const FHIR_BUNDLE_IDENTIFIER_SYSTEM = 'urn:findonsoftware:ai-medical-scribe:bundle';
+      const FHIR_DOCUMENT_LANGUAGE = 'en-GB';
+      const FHIR_COMPOSITION_TYPE = {
+        coding: [
+          {
+            system: 'http://loinc.org',
+            code: '11488-4',
+            display: 'Consult note'
+          }
+        ],
+        text: 'Consult note'
+      };
+
       const $ = (id) => document.getElementById(id);
 
       function uid(prefix) {
@@ -309,6 +322,314 @@
         });
       }
 
+      function toIsoInstant(timestamp) {
+        const value = Number(timestamp);
+        return new Date(Number.isFinite(value) && value > 0 ? value : Date.now()).toISOString();
+      }
+
+      function base64EncodeUtf8(text) {
+        const source = String(text || '');
+        const bytes = new TextEncoder().encode(source);
+        let binary = '';
+        const chunkSize = 0x8000;
+        for (let index = 0; index < bytes.length; index += chunkSize) {
+          const chunk = bytes.subarray(index, index + chunkSize);
+          binary += String.fromCharCode.apply(null, chunk);
+        }
+        return window.btoa(binary);
+      }
+
+      function escapeXmlText(text) {
+        return String(text || '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&apos;');
+      }
+
+      function toFhirXhtmlDivFromPlainText(text, title) {
+        const source = String(text || '').replace(/\r/g, '').trim();
+        const lines = source ? source.split('\n').map((line) => line.trim()).filter(Boolean) : [];
+        const content = [];
+
+        if (title) content.push('<p><b>' + escapeXmlText(title) + '</b></p>');
+
+        if (!lines.length) {
+          content.push('<p>Not stated</p>');
+          return '<div xmlns="http://www.w3.org/1999/xhtml">' + content.join('') + '</div>';
+        }
+
+        const listLike = lines.length > 1 && lines.every((line) => /^[-*•]\s+/.test(line));
+        if (listLike) {
+          content.push('<ul>' + lines.map((line) => '<li>' + escapeXmlText(line.replace(/^[-*•]\s+/, '')) + '</li>').join('') + '</ul>');
+          return '<div xmlns="http://www.w3.org/1999/xhtml">' + content.join('') + '</div>';
+        }
+
+        lines.forEach((line) => {
+          if (/^[-*•]\s+/.test(line)) content.push('<ul><li>' + escapeXmlText(line.replace(/^[-*•]\s+/, '')) + '</li></ul>');
+          else content.push('<p>' + escapeXmlText(line) + '</p>');
+        });
+        return '<div xmlns="http://www.w3.org/1999/xhtml">' + content.join('') + '</div>';
+      }
+
+      function buildSoapSectionsFromSession(session) {
+        const headings = ['Subjective', 'Examination', 'Assessment', 'Plan'];
+        const parsed = normaliseWhitespace(session && session.summary) ? parseStructuredSummary(session.summary) : null;
+        return headings.map((heading) => ({
+          title: heading,
+          items: parsed && parsed[heading] && parsed[heading].length ? parsed[heading].slice() : ['Not stated']
+        }));
+      }
+
+      function stripHtmlToPlainText(markup) {
+        const template = document.createElement('template');
+        template.innerHTML = String(markup || '');
+        return normaliseWhitespace(template.content.textContent || '');
+      }
+
+      function simplifyFhirObject(value) {
+        if (Array.isArray(value)) {
+          const items = value.map((item) => simplifyFhirObject(item)).filter((item) => item !== undefined);
+          return items.length ? items : undefined;
+        }
+        if (value && typeof value === 'object') {
+          const output = {};
+          Object.keys(value).forEach((key) => {
+            const nextValue = simplifyFhirObject(value[key]);
+            if (nextValue !== undefined) output[key] = nextValue;
+          });
+          return Object.keys(output).length ? output : undefined;
+        }
+        return value === undefined ? undefined : value;
+      }
+
+      function buildSessionFhirBundle(session) {
+        if (!session) throw new Error('Session is required for FHIR export.');
+
+        const sessionId = String(session.id || uid('session'));
+        const patientName = normaliseWhitespace(session.patientName || '');
+        const clinicianName = normaliseWhitespace(session.clinicianName || '');
+        const organisationName = normaliseWhitespace(state.customisation.organisationName || '') || 'Unknown organisation';
+        const consultationType = normaliseWhitespace(session.consultationType || '') || 'Consultation';
+        const transcriptText = buildTranscriptPlainText(session) || 'No transcript recorded.';
+        const manualNotes = String(session.manualNotes || '').trim() || 'No manual notes.';
+        const compositionDate = toIsoInstant(session.updatedAt || session.stoppedAt || Date.now());
+        const encounterStart = toIsoInstant(session.startedAt || session.createdAt || Date.now());
+        const encounterEnd = session.stoppedAt ? toIsoInstant(session.stoppedAt) : undefined;
+        const encounterStatusMap = {
+          listening: 'in-progress',
+          paused: 'in-progress',
+          stopped: 'finished',
+          idle: 'planned'
+        };
+        const docStatus = session.status === 'stopped' ? 'final' : 'preliminary';
+        const compositionStatus = session.status === 'stopped' ? 'final' : 'preliminary';
+        const patientFullUrl = 'urn:uuid:patient-' + sessionId;
+        const practitionerFullUrl = 'urn:uuid:practitioner-' + sessionId;
+        const organizationFullUrl = 'urn:uuid:organization-' + sessionId;
+        const encounterFullUrl = 'urn:uuid:encounter-' + sessionId;
+        const transcriptDocFullUrl = 'urn:uuid:docref-transcript-' + sessionId;
+        const manualNotesDocFullUrl = 'urn:uuid:docref-manual-notes-' + sessionId;
+        const authorReference = clinicianName ? practitionerFullUrl : organizationFullUrl;
+        const subjectReference = patientName ? patientFullUrl : undefined;
+        const generatedDocuments = Array.isArray(session.documents) ? session.documents : [];
+        const soapSections = buildSoapSectionsFromSession(session);
+
+        const organization = {
+          resourceType: 'Organization',
+          id: 'organization-' + sessionId,
+          name: organisationName
+        };
+
+        const practitioner = clinicianName ? {
+          resourceType: 'Practitioner',
+          id: 'practitioner-' + sessionId,
+          name: [{ text: clinicianName }]
+        } : null;
+
+        const patient = patientName ? {
+          resourceType: 'Patient',
+          id: 'patient-' + sessionId,
+          name: [{ text: patientName }]
+        } : null;
+
+        const encounter = simplifyFhirObject({
+          resourceType: 'Encounter',
+          id: 'encounter-' + sessionId,
+          status: encounterStatusMap[session.status] || 'planned',
+          class: {
+            system: 'http://terminology.hl7.org/CodeSystem/v3-ActCode',
+            code: 'AMB',
+            display: 'ambulatory'
+          },
+          type: consultationType ? [{ text: consultationType }] : undefined,
+          subject: subjectReference ? { reference: subjectReference } : undefined,
+          participant: clinicianName ? [{ individual: { reference: practitionerFullUrl } }] : undefined,
+          period: simplifyFhirObject({
+            start: encounterStart,
+            end: encounterEnd
+          })
+        });
+
+        const transcriptDocumentReference = simplifyFhirObject({
+          resourceType: 'DocumentReference',
+          id: 'docref-transcript-' + sessionId,
+          status: 'current',
+          docStatus,
+          type: { text: 'Consultation transcript' },
+          subject: subjectReference ? { reference: subjectReference } : undefined,
+          author: [{ reference: authorReference }],
+          date: compositionDate,
+          content: [{
+            attachment: {
+              contentType: 'text/plain; charset=utf-8',
+              language: FHIR_DOCUMENT_LANGUAGE,
+              title: 'Consultation transcript',
+              data: base64EncodeUtf8(transcriptText),
+              creation: compositionDate
+            }
+          }],
+          context: {
+            encounter: [{ reference: encounterFullUrl }]
+          }
+        });
+
+        const manualNotesDocumentReference = simplifyFhirObject({
+          resourceType: 'DocumentReference',
+          id: 'docref-manual-notes-' + sessionId,
+          status: 'current',
+          docStatus,
+          type: { text: 'Manual notes' },
+          subject: subjectReference ? { reference: subjectReference } : undefined,
+          author: [{ reference: authorReference }],
+          date: compositionDate,
+          content: [{
+            attachment: {
+              contentType: 'text/plain; charset=utf-8',
+              language: FHIR_DOCUMENT_LANGUAGE,
+              title: 'Manual notes',
+              data: base64EncodeUtf8(manualNotes),
+              creation: compositionDate
+            }
+          }],
+          context: {
+            encounter: [{ reference: encounterFullUrl }]
+          }
+        });
+
+        const generatedDocumentEntries = generatedDocuments.map((documentItem) => {
+          const fullUrl = 'urn:uuid:docref-generated-' + documentItem.id;
+          const documentDate = toIsoInstant(documentItem.updatedAt || documentItem.createdAt || Date.now());
+          const resource = simplifyFhirObject({
+            resourceType: 'DocumentReference',
+            id: 'docref-generated-' + documentItem.id,
+            status: 'current',
+            docStatus,
+            type: { text: documentItem.templateName || 'Generated document' },
+            subject: subjectReference ? { reference: subjectReference } : undefined,
+            author: [{ reference: authorReference }],
+            date: documentDate,
+            content: [{
+              attachment: {
+                contentType: 'text/html; charset=utf-8',
+                language: FHIR_DOCUMENT_LANGUAGE,
+                title: documentItem.title || documentItem.templateName || 'Generated document',
+                data: base64EncodeUtf8(String(documentItem.content || '')),
+                creation: documentDate
+              }
+            }],
+            context: {
+              encounter: [{ reference: encounterFullUrl }]
+            }
+          });
+          return { fullUrl, resource, documentItem };
+        });
+
+        const compositionSections = soapSections.map((section) => ({
+          title: section.title,
+          text: {
+            status: 'generated',
+            div: toFhirXhtmlDivFromPlainText(section.items.map((item) => '- ' + item).join('\n'))
+          }
+        }));
+
+        compositionSections.push({
+          title: 'Manual Notes',
+          text: {
+            status: 'generated',
+            div: toFhirXhtmlDivFromPlainText(manualNotes)
+          },
+          entry: [{ reference: manualNotesDocFullUrl }]
+        });
+
+        compositionSections.push({
+          title: 'Transcript',
+          text: {
+            status: 'generated',
+            div: toFhirXhtmlDivFromPlainText(transcriptText)
+          },
+          entry: [{ reference: transcriptDocFullUrl }]
+        });
+
+        compositionSections.push({
+          title: 'Generated Documents',
+          text: {
+            status: 'generated',
+            div: generatedDocumentEntries.length
+              ? toFhirXhtmlDivFromPlainText(generatedDocumentEntries.map((item) => '- ' + (item.documentItem.title || item.documentItem.templateName || 'Generated document')).join('\n'))
+              : toFhirXhtmlDivFromPlainText('No generated documents.')
+          },
+          entry: generatedDocumentEntries.length ? generatedDocumentEntries.map((item) => ({ reference: item.fullUrl })) : undefined
+        });
+
+        const composition = simplifyFhirObject({
+          resourceType: 'Composition',
+          id: 'composition-' + sessionId,
+          status: compositionStatus,
+          type: deepClone(FHIR_COMPOSITION_TYPE),
+          subject: subjectReference ? { reference: subjectReference } : undefined,
+          encounter: { reference: encounterFullUrl },
+          date: compositionDate,
+          author: [{ reference: authorReference }],
+          title: consultationType + ' for ' + (patientName || 'Unnamed patient'),
+          custodian: { reference: organizationFullUrl },
+          section: compositionSections
+        });
+
+        const entries = [
+          { fullUrl: 'urn:uuid:composition-' + sessionId, resource: composition },
+          patient ? { fullUrl: patientFullUrl, resource: patient } : null,
+          practitioner ? { fullUrl: practitionerFullUrl, resource: practitioner } : null,
+          { fullUrl: organizationFullUrl, resource: organization },
+          { fullUrl: encounterFullUrl, resource: encounter },
+          { fullUrl: transcriptDocFullUrl, resource: transcriptDocumentReference },
+          { fullUrl: manualNotesDocFullUrl, resource: manualNotesDocumentReference }
+        ].filter(Boolean);
+
+        generatedDocumentEntries.forEach((entry) => {
+          entries.push({ fullUrl: entry.fullUrl, resource: entry.resource });
+        });
+
+        return {
+          resourceType: 'Bundle',
+          id: 'bundle-' + sessionId,
+          identifier: {
+            system: FHIR_BUNDLE_IDENTIFIER_SYSTEM,
+            value: sessionId
+          },
+          type: 'document',
+          timestamp: compositionDate,
+          entry: entries
+        };
+      }
+
+      function downloadSessionFhir(session) {
+        const bundle = buildSessionFhirBundle(session);
+        const filename = sanitizeFilenamePart(session.patientName || 'session') + '_' + (toLocalDateInputValue(session.startedAt || session.createdAt || Date.now()) || 'session') + '_fhir.json';
+        downloadTextFile(filename, JSON.stringify(bundle, null, 2), 'application/fhir+json;charset=utf-8');
+      }
+
       function createDefaultSettings() {
         return {
           locale: 'en-GB',
@@ -594,6 +915,7 @@
         transcriptSearch: $('transcriptSearch'),
         copyTranscriptBtn: $('copyTranscriptBtn'),
         exportTranscriptBtn: $('exportTranscriptBtn'),
+        downloadFhirBtn: $('downloadFhirBtn'),
         startBtn: $('startBtn'),
         stopBtn: $('stopBtn'),
         pauseBtn: $('pauseBtn'),
@@ -615,6 +937,7 @@
         historyDetail: $('historyDetail'),
         historyEditToggle: $('historyEditToggle'),
         historySaveBtn: $('historySaveBtn'),
+        historyDownloadFhirBtn: $('historyDownloadFhirBtn'),
         historyDetailHint: $('historyDetailHint'),
         settingLocale: $('settingLocale'),
         settingAutoPunctuation: $('settingAutoPunctuation'),
@@ -1897,6 +2220,7 @@
         renderLastSavedLabel();
         renderConsultationSummaryLabel();
         refreshControlStates();
+        refs.downloadFhirBtn.disabled = !state.activeSession;
       }
 
       function renderMacroBar() {
@@ -2146,6 +2470,7 @@
         const session = getSelectedHistorySession();
         refs.historyEditToggle.disabled = !session;
         refs.historySaveBtn.disabled = !session;
+        refs.historyDownloadFhirBtn.disabled = !session;
         refs.historyDetailHint.textContent = session ? 'Review transcript, notes, metadata, and tags for the selected session.' : 'Select a session to review transcript and notes.';
         refs.historyEditToggle.textContent = state.historyEditMode ? 'Read Mode' : 'Edit Mode';
         if (!session) {
@@ -2652,6 +2977,28 @@
         });
         refs.copyTranscriptBtn.addEventListener('click', copyCurrentTranscript);
         refs.exportTranscriptBtn.addEventListener('click', exportCurrentTranscript);
+        refs.downloadFhirBtn.addEventListener('click', () => {
+          if (!state.activeSession) {
+            showToast('There is no active session to export.', 'warning');
+            return;
+          }
+          try {
+            downloadSessionFhir(state.activeSession);
+            showToast('FHIR document downloaded.', 'success');
+          } catch (error) {
+            showToast('FHIR export failed.', 'error');
+          }
+        });
+        refs.historyDownloadFhirBtn.addEventListener('click', () => {
+          const session = getSelectedHistorySession();
+          if (!session) return;
+          try {
+            downloadSessionFhir(session);
+            showToast('FHIR document downloaded.', 'success');
+          } catch (error) {
+            showToast('FHIR export failed.', 'error');
+          }
+        });
         refs.macroBar.addEventListener('click', (event) => {
           const button = event.target.closest('[data-macro-id]');
           if (!button) return;
