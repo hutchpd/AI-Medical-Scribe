@@ -258,6 +258,22 @@
         return left + (needsSpace ? ' ' : '') + incoming.trimStart();
       }
 
+      function shouldMergeTranscriptEntry(lastEntry, nextTimestamp) {
+        if (!lastEntry || lastEntry.isImportantMarker) return false;
+
+        const previousText = String(lastEntry.text || '').trim();
+        const previousTimestamp = lastEntry.lastUpdatedAt || lastEntry.timestamp || nextTimestamp;
+        const gapMs = Math.max(0, nextTimestamp - previousTimestamp);
+        const wordCount = previousText ? previousText.split(/\s+/).length : 0;
+
+        if (gapMs >= 3200) return false;
+        if (String(previousText).length >= 280) return false;
+        if (/[.!?…]$/.test(previousText) && gapMs >= 1200) return false;
+        if (wordCount >= 18 && gapMs >= 1800) return false;
+
+        return true;
+      }
+
       function scrollTranscriptToBottom(container) {
         if (!container) return;
         window.requestAnimationFrame(() => {
@@ -537,8 +553,6 @@
         autoSaveIntervalId: null,
         speechProvider: null,
         supportsSpeech: 'webkitSpeechRecognition' in window,
-        supportsAiSummary: 'LanguageModel' in self,
-        supportsSummarizer: 'Summarizer' in self,
         summaryRequestTokens: {},
         lastPersistedAt: null
       };
@@ -754,6 +768,14 @@
         return value ? 'available' : 'unavailable';
       }
 
+      function getLanguageModelApi() {
+        return typeof globalThis.LanguageModel !== 'undefined' ? globalThis.LanguageModel : null;
+      }
+
+      function getSummarizerApi() {
+        return typeof globalThis.Summarizer !== 'undefined' ? globalThis.Summarizer : null;
+      }
+
       function findSession(sessionId) { return state.sessions.find((session) => session.id === sessionId) || null; }
 
       function getDefaultPractitionerName() {
@@ -777,9 +799,9 @@
           {
             key: 'speech',
             title: 'Speech recognition',
-            description: 'Live consultation transcription in Chrome.',
+            description: 'Live consultation transcription in a supported browser.',
             availability: state.apiCapabilityStatus.speech.availability,
-            detail: state.apiCapabilityStatus.speech.detail || (state.supportsSpeech ? 'Speech recognition is available in this browser.' : 'Chrome speech recognition was not detected in this browser.')
+            detail: state.apiCapabilityStatus.speech.detail || (state.supportsSpeech ? 'Speech recognition is available in this browser.' : 'Speech recognition was not detected in this browser.')
           },
           {
             key: 'prompt',
@@ -838,62 +860,77 @@
         renderSplashScreen();
       }
 
+      async function getPromptApiAvailability() {
+        const languageModelApi = getLanguageModelApi();
+        if (!languageModelApi) return 'unavailable';
+        try {
+          return await languageModelApi.availability(getPromptApiOptions());
+        } catch (error) {
+          return 'availability-check-failed';
+        }
+      }
+
+      async function getSummarizerAvailability() {
+        const summarizerApi = getSummarizerApi();
+        if (!summarizerApi) return 'unavailable';
+        try {
+          if (typeof summarizerApi.availability === 'function') return await summarizerApi.availability();
+          return 'available';
+        } catch (error) {
+          return 'availability-check-failed';
+        }
+      }
+
       async function refreshApiCapabilityChecks() {
         const requestToken = uid('capability');
         state.capabilityCheckToken = requestToken;
         state.apiCapabilityStatus.speech = {
           availability: stateSupports(state.supportsSpeech),
-          detail: state.supportsSpeech ? 'Speech recognition is available in this browser.' : 'Speech recognition is not available. Open the app in Chrome to use live transcription.'
+          detail: state.supportsSpeech ? 'Speech recognition is available in this browser.' : 'Speech recognition is not available. Open the app in a supported Chromium browser such as Chrome or Edge to use live transcription.'
         };
         state.apiCapabilityStatus.prompt = { availability: 'checking', detail: 'Checking Prompt API availability...' };
         state.apiCapabilityStatus.summarizer = { availability: 'checking', detail: 'Checking Summarizer API availability...' };
         renderSplashScreen();
 
-        if (hasPromptApiSupport()) {
-          try {
-            const availability = await LanguageModel.availability(getPromptApiOptions());
-            if (state.capabilityCheckToken !== requestToken) return;
-            state.apiCapabilityStatus.prompt = {
-              availability: availability,
-              detail: availability === 'available'
-                ? 'Prompt API is ready for on-device document drafting and SOAP summaries.'
-                : ('Prompt API was detected, but it is currently ' + availability + '.')
-            };
-          } catch (error) {
-            if (state.capabilityCheckToken !== requestToken) return;
-            state.apiCapabilityStatus.prompt = {
-              availability: 'availability-check-failed',
-              detail: 'Prompt API was detected, but the availability check failed in this browser build.'
-            };
-          }
-        } else {
+        const promptAvailability = await getPromptApiAvailability();
+        if (state.capabilityCheckToken !== requestToken) return;
+        if (promptAvailability === 'unavailable') {
           state.apiCapabilityStatus.prompt = {
             availability: 'unavailable',
             detail: 'Prompt API was not detected in this browser.'
           };
+        } else if (promptAvailability === 'availability-check-failed') {
+          state.apiCapabilityStatus.prompt = {
+            availability: 'availability-check-failed',
+            detail: 'Prompt API was detected, but the availability check failed in this browser build.'
+          };
+        } else {
+          state.apiCapabilityStatus.prompt = {
+            availability: promptAvailability,
+            detail: promptAvailability === 'available'
+              ? 'Prompt API is ready for on-device document drafting and SOAP summaries.'
+              : ('Prompt API was detected, but it is currently ' + promptAvailability + '.')
+          };
         }
 
-        if (hasSummarizerSupport()) {
-          try {
-            const availability = typeof Summarizer.availability === 'function' ? await Summarizer.availability() : 'available';
-            if (state.capabilityCheckToken !== requestToken) return;
-            state.apiCapabilityStatus.summarizer = {
-              availability: availability === 'available' ? 'available' : String(availability || 'unavailable'),
-              detail: availability === 'available'
-                ? 'Summarizer API is available as a fallback for summary generation.'
-                : ('Summarizer API was detected, but it is currently ' + availability + '.')
-            };
-          } catch (error) {
-            if (state.capabilityCheckToken !== requestToken) return;
-            state.apiCapabilityStatus.summarizer = {
-              availability: 'availability-check-failed',
-              detail: 'Summarizer API was detected, but the availability check failed in this browser build.'
-            };
-          }
-        } else {
+        const summarizerAvailability = await getSummarizerAvailability();
+        if (state.capabilityCheckToken !== requestToken) return;
+        if (summarizerAvailability === 'unavailable') {
           state.apiCapabilityStatus.summarizer = {
             availability: 'unavailable',
             detail: 'Summarizer API was not detected in this browser.'
+          };
+        } else if (summarizerAvailability === 'availability-check-failed') {
+          state.apiCapabilityStatus.summarizer = {
+            availability: 'availability-check-failed',
+            detail: 'Summarizer API was detected, but the availability check failed in this browser build.'
+          };
+        } else {
+          state.apiCapabilityStatus.summarizer = {
+            availability: summarizerAvailability === 'available' ? 'available' : String(summarizerAvailability || 'unavailable'),
+            detail: summarizerAvailability === 'available'
+              ? 'Summarizer API is available as a fallback for summary generation.'
+              : ('Summarizer API was detected, but it is currently ' + summarizerAvailability + '.')
           };
         }
 
@@ -964,11 +1001,11 @@
       }
 
       function hasPromptApiSupport() {
-        return Boolean('LanguageModel' in self && state.supportsAiSummary);
+        return Boolean(getLanguageModelApi());
       }
 
       function hasSummarizerSupport() {
-        return Boolean('Summarizer' in self && state.supportsSummarizer);
+        return Boolean(getSummarizerApi());
       }
 
       function hasAiSummarySupport() {
@@ -1127,7 +1164,9 @@
       async function promptWithLanguageModel(promptText) {
         let sessionHandle = null;
         try {
-          sessionHandle = await LanguageModel.create(getPromptApiOptions());
+          const languageModelApi = getLanguageModelApi();
+          if (!languageModelApi) throw new Error('Prompt API is not available in this browser.');
+          sessionHandle = await languageModelApi.create(getPromptApiOptions());
           const result = await sessionHandle.prompt(promptText);
           const summaryText = String(result || '').trim();
           if (!summaryText) throw new Error('The browser returned an empty summary.');
@@ -1144,7 +1183,9 @@
       async function summarizeWithSummarizer(text) {
         let sessionHandle = null;
         try {
-          sessionHandle = await Summarizer.create({
+          const summarizerApi = getSummarizerApi();
+          if (!summarizerApi) throw new Error('Summarizer API is not available in this browser.');
+          sessionHandle = await summarizerApi.create({
             type: 'key-points',
             format: 'markdown',
             length: 'medium'
@@ -1190,12 +1231,7 @@
         if (!normaliseWhitespace(transcriptSource)) return '';
 
         if (hasPromptApiSupport()) {
-          let availability = 'unavailable';
-          try {
-            availability = await LanguageModel.availability(getPromptApiOptions());
-          } catch (error) {
-            availability = 'availability-check-failed';
-          }
+          const availability = await getPromptApiAvailability();
           if (availability === 'available') return summarizeChunkedWithPromptApi(transcriptSource, promptTemplate);
           if (!hasSummarizerSupport()) throw new Error('Language model is not available: ' + availability);
         }
@@ -1625,16 +1661,12 @@
         refreshDocumentGenerationUi();
 
         try {
-          const availability = await LanguageModel.availability({
-            expectedOutputLanguage: 'en',
-            expectedOutputs: [{ type: 'text', languages: ['en'] }]
-          });
+          const languageModelApi = getLanguageModelApi();
+          if (!languageModelApi) throw new Error('Prompt API is not available in this browser.');
+          const availability = await getPromptApiAvailability();
           if (availability !== 'available') throw new Error('Language model is not available: ' + availability);
 
-          sessionHandle = await LanguageModel.create({
-            expectedOutputLanguage: 'en',
-            expectedOutputs: [{ type: 'text', languages: ['en'] }]
-          });
+          sessionHandle = await languageModelApi.create(getPromptApiOptions());
 
           const result = await sessionHandle.prompt(requestPrompt);
           if (!String(result || '').trim()) throw new Error('The browser returned an empty document.');
@@ -1848,7 +1880,7 @@
           return;
         }
         refs.speechSupportMessage.classList.add('visible');
-        refs.speechSupportMessage.textContent = 'Speech recognition is not supported in this browser. Open this file in Chrome to use live transcription. Manual notes, session saving, history, settings, and customisation still work.';
+        refs.speechSupportMessage.textContent = 'Speech recognition is not supported in this browser. Open this file in a supported Chromium browser such as Chrome or Edge to use live transcription. Manual notes, session saving, history, settings, and customisation still work.';
       }
 
       function renderActiveSessionStateText() {
@@ -2199,8 +2231,8 @@
         refs.settingLineSpacingValue.textContent = Number(state.settings.transcriptLineSpacing).toFixed(2);
         refs.settingSummaryPrompt.value = getSummaryPromptValue();
         refs.settingSummaryAvailability.textContent = hasAiSummarySupport()
-          ? (state.supportsAiSummary
-            ? 'Chrome Prompt API is available through the browser. Summaries run on-device with no API key.'
+          ? (hasPromptApiSupport()
+            ? 'Prompt API is available through the browser. Summaries run on-device with no API key.'
             : 'Prompt API is unavailable, but the Summarizer API is available as a fallback.')
           : 'Prompt API and Summarizer API are unavailable in this browser, so summary generation is unavailable here.';
       }
@@ -2319,7 +2351,7 @@
           displayText = applyAutoPunctuation(displayText, shouldSentenceCase);
         }
         const lastEntry = session.transcriptEntries.length ? session.transcriptEntries[session.transcriptEntries.length - 1] : null;
-        const shouldMerge = Boolean(lastEntry) && !lastEntry.isImportantMarker && (now - (lastEntry.lastUpdatedAt || lastEntry.timestamp || now)) < 12000 && String(lastEntry.text || '').length < 340;
+        const shouldMerge = shouldMergeTranscriptEntry(lastEntry, now);
         if (shouldMerge) {
           lastEntry.text = mergeTranscriptText(lastEntry.text || '', displayText);
           if (result.confidence != null) {
@@ -2357,7 +2389,7 @@
         if (session && (code === 'not-allowed' || code === 'service-not-allowed')) transitionSessionStatus(session, 'stopped', { skipPersist: true });
         else if (session && (code === 'audio-capture' || code === 'network')) transitionSessionStatus(session, 'paused', { skipPersist: true });
         const messageMap = {
-          'not-allowed': 'Microphone access was blocked. Allow microphone access in Chrome and try again.',
+          'not-allowed': 'Microphone access was blocked. Allow microphone access in the browser and try again.',
           'service-not-allowed': 'Speech recognition service access was blocked by the browser.',
           'audio-capture': 'No microphone input was found. Check the selected device and permissions.',
           'network': 'Speech recognition was interrupted. The session remains available.',
@@ -2368,7 +2400,7 @@
       }
 
       function beginListening() {
-        if (!state.supportsSpeech || !state.speechProvider) { showToast('Live speech recognition is unavailable in this browser. Open the file in Chrome.', 'warning', 4200); return; }
+        if (!state.supportsSpeech || !state.speechProvider) { showToast('Live speech recognition is unavailable in this browser. Open the file in a supported Chromium browser such as Chrome or Edge.', 'warning', 4200); return; }
         if (state.activeSession && state.activeSession.status === 'paused') { resumeListening(); return; }
         state.interimText = '';
         refs.transcriptSearch.value = '';
@@ -2888,6 +2920,16 @@
         if (state.activeSession && state.activeSession.status === 'listening' && state.activeSession.lastStartedSegmentAt) ensureTimerRunning();
         if (removedCount > 0) showToast('Removed ' + removedCount + ' old session' + (removedCount === 1 ? '' : 's') + ' based on retention settings.', 'warning', 4200);
       }
+
+      window.__scribeDebugCapabilities = async function () {
+        return {
+          speechSupported: Boolean(state.supportsSpeech),
+          languageModelPresent: Boolean(getLanguageModelApi()),
+          summarizerPresent: Boolean(getSummarizerApi()),
+          promptAvailability: await getPromptApiAvailability(),
+          summarizerAvailability: await getSummarizerAvailability()
+        };
+      };
 
       init();
     })();

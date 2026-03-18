@@ -1,5 +1,7 @@
 # AI Medical Scribe
 
+![Demo](demo.gif)
+
 AI Medical Scribe is a browser-based prototype for live consultation transcription, on-device summarisation, and document drafting.
 
 It is designed as a local-first front end. Session capture, notes, summaries, generated documents, settings, and customisation are all handled in the browser with no project backend.
