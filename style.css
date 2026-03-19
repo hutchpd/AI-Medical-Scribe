@@ -852,6 +852,7 @@
     .transcript-entry.review-focus {
       box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.18), 0 18px 30px rgba(var(--accent-rgb), 0.16);
       border-color: rgba(var(--accent-rgb), 0.34);
+    }
 
     .interim-container {
       margin-top: 12px;
@@ -1103,6 +1104,53 @@
     }
 
     .detail-block + .detail-block { margin-top: 16px; }
+
+    .audit-output {
+      min-height: 120px;
+      max-height: 340px;
+      overflow: auto;
+    }
+
+    .audit-timeline {
+      display: grid;
+      gap: 10px;
+    }
+
+    .audit-event {
+      border-radius: 14px;
+      border: 1px solid var(--border);
+      background: var(--card);
+      padding: 12px;
+    }
+
+    .audit-event-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+
+    .audit-event-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .audit-event-detail {
+      color: var(--text);
+      line-height: 1.45;
+    }
+
+    .audit-event-extra {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 0.86rem;
+      line-height: 1.45;
+      word-break: break-word;
+    }
 
     .detail-header-row {
       display: flex;
@@ -1384,7 +1432,6 @@
     }
     .review-structured-group h5 {
       margin-bottom: 8px;
-    }
     }
 
     .toggle-wrap {

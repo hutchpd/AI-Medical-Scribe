@@ -2,7 +2,7 @@
 
 ![Demo](demo.gif)
 
-AI Medical Scribe is a browser-based prototype for live consultation transcription, on-device summarisation, document drafting, structured extraction, review-mode highlighting, structured client-side FHIR export, and optional direct browser-based FHIR delivery to a configured endpoint.
+AI Medical Scribe is a browser-based prototype for live consultation transcription, on-device summarisation, document drafting, structured extraction, confidence-aware review-mode highlighting, local append-only audit logging, structured client-side FHIR export, and optional direct browser-based FHIR delivery to a configured endpoint.
 
 It is designed as a local-first front end. Session capture, notes, summaries, generated documents, FHIR exports, settings, and customisation are all handled in the browser with no project backend.
 
@@ -24,6 +24,8 @@ This project explores a different approach:
 - Rich text document drafting from transcript content using configurable templates.
 - Structured extraction that turns transcript, manual notes, and summaries into clinically useful buckets (for example: problems, medications, allergies, investigations, follow-up actions, diagnoses, safety netting, and admin tasks).
 - Review mode with confidence highlighting, provenance cues, stale/needs-review badges, and quick actions to help clinicians validate outputs faster.
+- Confidence indicators that make uncertainty explicit rather than treating all transcript and generated output as equally reliable.
+- Local append-only session audit log for trust and traceability of important user/system actions.
 - Client-side FHIR R4 document Bundle export for the active session or a selected history session, with structured Composition sections and optional clinical resources.
 - Optional direct browser-side POST of FHIR export payloads to a configured endpoint, with download-based export still available.
 - Session history with review, edit, duplicate, archive, and delete workflows.
@@ -158,6 +160,7 @@ In some Chrome builds, `chrome://components` may show `Optimization Guide On Dev
 3. Speak or simulate a consultation
 4. Stop session to generate summary
 5. Use Structured View and Review Mode to validate extracted and generated content before finalising
+6. Open History to inspect the local audit timeline and optionally export it as text or JSON
 
 ## How It Works
 
@@ -196,6 +199,28 @@ What this adds in practice:
 - Stale and needs-review badges that flag content likely affected by later edits.
 - Quick review actions (for example regenerate summary/document, re-run extraction, and jump to relevant transcript entries).
 
+### Confidence Indicators
+
+Confidence indicators are designed to make uncertainty visible instead of implying all output is equal.
+
+What this adds in practice:
+
+- Transcript entries are grouped into confidence bands (for example high, medium, and low) for faster clinician triage.
+- Review mode can filter directly to low-confidence transcript segments.
+- Confidence labels and visual emphasis help clinicians decide where to verify first.
+
+### Local Audit Log
+
+Each session now keeps a local append-only audit trail for trust and traceability.
+
+What this adds in practice:
+
+- Important actions are logged with timestamp, type, actor, detail, and lightweight metadata.
+- Events include lifecycle actions (start/pause/resume/stop), edits, generation actions, structured extraction runs, FHIR download/send, archive/restore/delete, and lock/unlock activity.
+- Frequent edit logging is debounced to avoid noisy per-keystroke event spam (for example manual notes are logged as "manual notes updated").
+- The audit timeline is viewable in History and can be copied or exported as `.txt` or `.json`.
+- Audit data remains local to the browser, and metadata is intentionally limited (no secrets and no full document bodies in event metadata).
+
 ### FHIR Export
 
 Sessions can be exported as a FHIR R4 JSON document Bundle directly in the browser, or sent from the browser to a configured FHIR endpoint.
@@ -215,6 +240,8 @@ What that means in practice:
 ### Storage
 
 Sessions, notes, settings, customisation, summaries, and generated documents are handled in-browser only. By default, local data is stored in browser local storage. FHIR exports are generated on demand for download and are not persisted by the app unless the user chooses to keep the downloaded file.
+
+Session records now also include a local append-only audit event history used for in-app traceability views and optional local export.
 
 If direct FHIR delivery is configured, endpoint details are also stored in local browser settings. The current prototype masks credentials in the UI, but does not yet encrypt settings storage.
 

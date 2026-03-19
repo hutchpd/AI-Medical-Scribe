@@ -35,6 +35,8 @@
         { key: 'safetyNetting', label: 'Safety netting', placeholder: 'One safety-netting item per line' },
         { key: 'adminTasks', label: 'Admin tasks', placeholder: 'One admin task per line' }
       ];
+      const AUDIT_MANUAL_NOTES_DEBOUNCE_MS = 1400;
+      const AUDIT_TRANSCRIPT_EDIT_DEBOUNCE_MS = 700;
 
       const $ = (id) => document.getElementById(id);
 
@@ -252,6 +254,220 @@
 
       function deepClone(value) {
         return JSON.parse(JSON.stringify(value));
+      }
+
+      function sanitizeAuditMetadata(value, depth = 0) {
+        if (depth > 3) return undefined;
+        if (value == null) return undefined;
+        if (typeof value === 'string') {
+          const text = normaliseWhitespace(value);
+          return text ? text.slice(0, 220) : undefined;
+        }
+        if (typeof value === 'number' || typeof value === 'boolean') return value;
+        if (Array.isArray(value)) {
+          const items = value
+            .map((item) => sanitizeAuditMetadata(item, depth + 1))
+            .filter((item) => item !== undefined)
+            .slice(0, 24);
+          return items.length ? items : undefined;
+        }
+        if (typeof value === 'object') {
+          const redactedKeyPattern = /(token|secret|password|passphrase|authorization|auth|credential|headerValue|bearer)/i;
+          const output = {};
+          Object.entries(value).forEach(([key, item]) => {
+            if (redactedKeyPattern.test(String(key || ''))) return;
+            const sanitized = sanitizeAuditMetadata(item, depth + 1);
+            if (sanitized !== undefined) output[key] = sanitized;
+          });
+          return Object.keys(output).length ? output : undefined;
+        }
+        return undefined;
+      }
+
+      function normalizeAuditEvent(rawEvent = {}) {
+        const timestamp = typeof rawEvent.timestamp === 'number' ? rawEvent.timestamp : Date.now();
+        const type = normaliseWhitespace(rawEvent.type || 'event').toLowerCase().replace(/\s+/g, '-');
+        const detail = normaliseWhitespace(rawEvent.detail || 'Event recorded.');
+        const actor = rawEvent.actor === 'system' ? 'system' : 'user';
+        return {
+          id: rawEvent.id || uid('audit'),
+          timestamp,
+          type,
+          actor,
+          detail: detail || 'Event recorded.',
+          metadata: sanitizeAuditMetadata(rawEvent.metadata)
+        };
+      }
+
+      function normalizeAuditEvents(events) {
+        const seen = new Set();
+        return (Array.isArray(events) ? events : [])
+          .map((eventItem) => normalizeAuditEvent(eventItem))
+          .filter((eventItem) => {
+            if (seen.has(eventItem.id)) return false;
+            seen.add(eventItem.id);
+            return true;
+          })
+          .sort((left, right) => {
+            if (left.timestamp !== right.timestamp) return left.timestamp - right.timestamp;
+            return String(left.id).localeCompare(String(right.id));
+          });
+      }
+
+      function appendAuditEvent(session, type, detail, metadata, actor = 'system') {
+        if (!session || !type) return null;
+        const nextEvent = normalizeAuditEvent({
+          type,
+          detail,
+          metadata,
+          actor,
+          timestamp: Date.now()
+        });
+        session.auditEvents = normalizeAuditEvents([].concat(session.auditEvents || [], nextEvent));
+        session.updatedAt = Math.max(session.updatedAt || 0, nextEvent.timestamp);
+        return nextEvent;
+      }
+
+      function getSessionAuditEvents(session, order = 'desc') {
+        const events = normalizeAuditEvents(session && session.auditEvents);
+        return order === 'asc' ? events : events.slice().reverse();
+      }
+
+      function clearSessionAuditDebounceState(sessionId) {
+        const sessionKey = String(sessionId || '');
+        if (!sessionKey) return;
+        const manualNotesTimer = state.auditDebounce.manualNotesTimers[sessionKey];
+        if (manualNotesTimer) {
+          window.clearTimeout(manualNotesTimer);
+          delete state.auditDebounce.manualNotesTimers[sessionKey];
+        }
+        Object.keys(state.auditDebounce.transcriptEditTimers).forEach((key) => {
+          if (!key.startsWith(sessionKey + ':')) return;
+          window.clearTimeout(state.auditDebounce.transcriptEditTimers[key]);
+          delete state.auditDebounce.transcriptEditTimers[key];
+        });
+        delete state.auditDebounce.manualNotesSignatures[sessionKey];
+      }
+
+      function queueManualNotesAuditEvent(sessionId, source = 'consultation') {
+        const sessionKey = String(sessionId || '');
+        if (!sessionKey) return;
+        const existingTimer = state.auditDebounce.manualNotesTimers[sessionKey];
+        if (existingTimer) window.clearTimeout(existingTimer);
+        state.auditDebounce.manualNotesTimers[sessionKey] = window.setTimeout(() => {
+          delete state.auditDebounce.manualNotesTimers[sessionKey];
+          const session = findSession(sessionKey);
+          if (!session) return;
+          const signature = normaliseWhitespace(session.manualNotes || '');
+          if (state.auditDebounce.manualNotesSignatures[sessionKey] === signature) return;
+          state.auditDebounce.manualNotesSignatures[sessionKey] = signature;
+          appendAuditEvent(
+            session,
+            'manual-notes-updated',
+            'Manual notes updated.',
+            { source, characterCount: String(session.manualNotes || '').length },
+            'user'
+          );
+          upsertSession(session);
+          persistSessionsDebounced();
+          if (state.currentTab === 'history' && state.historySelectedSessionId === session.id) renderHistoryDetail();
+        }, AUDIT_MANUAL_NOTES_DEBOUNCE_MS);
+      }
+
+      function queueTranscriptEditAuditEvent(sessionId, entryId, source = 'consultation') {
+        const sessionKey = String(sessionId || '');
+        const entryKey = String(entryId || '');
+        if (!sessionKey || !entryKey) return;
+        const timerKey = sessionKey + ':' + entryKey;
+        const existingTimer = state.auditDebounce.transcriptEditTimers[timerKey];
+        if (existingTimer) window.clearTimeout(existingTimer);
+        state.auditDebounce.transcriptEditTimers[timerKey] = window.setTimeout(() => {
+          delete state.auditDebounce.transcriptEditTimers[timerKey];
+          const session = findSession(sessionKey);
+          if (!session) return;
+          const entry = (session.transcriptEntries || []).find((item) => item.id === entryKey);
+          if (!entry) return;
+          appendAuditEvent(
+            session,
+            'transcript-entry-edited',
+            'Transcript entry edited.',
+            {
+              source,
+              entryId: entry.id,
+              isImportantMarker: Boolean(entry.isImportantMarker),
+              characterCount: String(entry.text || '').length
+            },
+            'user'
+          );
+          upsertSession(session);
+          persistSessionsDebounced();
+          if (state.currentTab === 'history' && state.historySelectedSessionId === session.id) renderHistoryDetail();
+        }, AUDIT_TRANSCRIPT_EDIT_DEBOUNCE_MS);
+      }
+
+      function getAuditTypeLabel(type) {
+        return String(type || '')
+          .replace(/[-_]+/g, ' ')
+          .replace(/\b\w/g, (match) => match.toUpperCase()) || 'Event';
+      }
+
+      function formatAuditMetadataInline(metadata) {
+        const value = sanitizeAuditMetadata(metadata);
+        if (!value) return '';
+        const entries = Object.entries(value);
+        if (!entries.length) return '';
+        return entries.map(([key, item]) => key + ': ' + (typeof item === 'string' ? item : JSON.stringify(item))).join(' | ');
+      }
+
+      function buildAuditTimelineHtml(session) {
+        const events = getSessionAuditEvents(session, 'desc');
+        if (!events.length) return '<div class="empty-state small">No audit events recorded for this session yet.</div>';
+        return '<div class="audit-timeline">' + events.map((eventItem) =>
+          '<article class="audit-event">' +
+            '<div class="audit-event-head">' +
+              '<div class="audit-event-meta"><span class="meta-badge">' + escapeHtml(formatDateTime(eventItem.timestamp)) + '</span><span class="review-badge provenance">' + escapeHtml(eventItem.actor) + '</span><span class="review-badge">' + escapeHtml(getAuditTypeLabel(eventItem.type)) + '</span></div>' +
+            '</div>' +
+            '<div class="audit-event-detail">' + escapeHtml(eventItem.detail) + '</div>' +
+            (eventItem.metadata ? '<div class="audit-event-extra">' + escapeHtml(formatAuditMetadataInline(eventItem.metadata)) + '</div>' : '') +
+          '</article>'
+        ).join('') + '</div>';
+      }
+
+      function buildAuditLogText(session) {
+        const events = getSessionAuditEvents(session, 'asc');
+        const header = [
+          'Session audit log',
+          'Session ID: ' + (session && session.id || ''),
+          'Patient: ' + (session && session.patientName || '-'),
+          'Clinician: ' + (session && session.clinicianName || '-'),
+          ''
+        ];
+        const lines = events.map((eventItem) => {
+          const line = '[' + formatDateTime(eventItem.timestamp) + '] ' + eventItem.actor.toUpperCase() + ' ' + eventItem.type + ' - ' + eventItem.detail;
+          const metadataLine = eventItem.metadata ? '  metadata: ' + formatAuditMetadataInline(eventItem.metadata) : '';
+          return metadataLine ? line + '\n' + metadataLine : line;
+        });
+        return header.concat(lines).join('\n');
+      }
+
+      function exportSessionAuditLog(session, format = 'json') {
+        if (!session) return;
+        const dateSegment = String(toIsoInstant(session.startedAt || session.createdAt || Date.now())).slice(0, 10);
+        const baseFilename = sanitizeFilenamePart((session.patientName || 'session') + '_' + dateSegment + '_audit_log');
+        if (format === 'text') {
+          downloadTextFile(baseFilename + '.txt', buildAuditLogText(session), 'text/plain;charset=utf-8');
+          return;
+        }
+        const payload = {
+          sessionId: session.id,
+          patientName: session.patientName || '',
+          clinicianName: session.clinicianName || '',
+          createdAt: session.createdAt || null,
+          startedAt: session.startedAt || null,
+          updatedAt: session.updatedAt || null,
+          events: getSessionAuditEvents(session, 'asc')
+        };
+        downloadTextFile(baseFilename + '.json', JSON.stringify(payload, null, 2), 'application/json;charset=utf-8');
       }
 
       function hexToRgbTuple(hex) {
@@ -1288,6 +1504,9 @@
         const isoLikeDate = String(toIsoInstant(session.startedAt || session.createdAt || Date.now())).slice(0, 10) || 'session';
         const filename = sessionLabel + '_' + isoLikeDate + '_fhir.json';
         downloadTextFile(filename, JSON.stringify(bundle, null, 2), 'application/fhir+json;charset=utf-8');
+        appendAuditEvent(session, 'fhir-downloaded', 'FHIR document downloaded.', { entryCount: Array.isArray(bundle.entry) ? bundle.entry.length : 0 }, 'user');
+        upsertSession(session);
+        persistSessionsDebounced();
       }
 
       function createDefaultSettings() {
@@ -1384,6 +1603,7 @@
           structuredDataUpdatedAt: typeof overrides.structuredDataUpdatedAt === 'number' ? overrides.structuredDataUpdatedAt : null,
           structuredDataStatus,
           structuredDataError: String(overrides.structuredDataError || ''),
+          auditEvents: normalizeAuditEvents(overrides.auditEvents),
           lastFhirSentAt: typeof overrides.lastFhirSentAt === 'number' ? overrides.lastFhirSentAt : null,
           lastFhirSentStatus: String(overrides.lastFhirSentStatus || ''),
           lastFhirSentEndpoint: String(overrides.lastFhirSentEndpoint || ''),
@@ -1399,6 +1619,7 @@
         session.tags = dedupeStrings(rawSession && rawSession.tags);
         session.ephemeral = Boolean(rawSession && rawSession.ephemeral);
         session.structuredData = normalizeStructuredData(rawSession && rawSession.structuredData);
+        session.auditEvents = normalizeAuditEvents(rawSession && rawSession.auditEvents);
         session.manualNotesUpdatedAt = typeof rawSession?.manualNotesUpdatedAt === 'number'
           ? rawSession.manualNotesUpdatedAt
           : (normaliseWhitespace(session.manualNotes) ? (session.updatedAt || session.createdAt) : null);
@@ -1573,11 +1794,13 @@
 
           if (!response.ok) {
             updateSessionFhirSendAudit(session, 'failed (' + response.status + ')', endpointUrl);
+            appendAuditEvent(session, 'fhir-sent', 'FHIR send failed.', { endpointUrl, status: response.status }, 'user');
             await persistSessions();
             throw new Error('Endpoint returned ' + response.status + ' ' + (response.statusText || 'response') + '.');
           }
 
           updateSessionFhirSendAudit(session, 'sent', endpointUrl);
+          appendAuditEvent(session, 'fhir-sent', 'FHIR sent to configured endpoint.', { endpointUrl, status: response.status, mode: state.settings.fhirSendMode }, 'user');
           await persistSessions();
           renderConsultation();
           renderHistory();
@@ -1587,6 +1810,7 @@
             ? 'Request timed out while sending to the configured FHIR endpoint.'
             : normaliseWhitespace(error && error.message ? error.message : String(error || 'Unable to send FHIR.'));
           updateSessionFhirSendAudit(session, 'failed', endpointUrl);
+          appendAuditEvent(session, 'fhir-sent', 'FHIR send failed.', { endpointUrl, status: 'failed' }, 'user');
           await persistSessions();
           renderConsultation();
           renderHistory();
@@ -1793,6 +2017,7 @@
         const sessionsToRemove = state.sessions.filter((session) => predicate(session));
         if (!sessionsToRemove.length) return { removedCount: 0, removedActive: false, didPersist: true };
         const removedActive = Boolean(state.activeSession && sessionsToRemove.some((session) => session.id === state.activeSession.id));
+        sessionsToRemove.forEach((session) => clearSessionAuditDebounceState(session.id));
         state.sessions = state.sessions.filter((session) => !predicate(session));
         maybeResetSelectionAfterRemoval();
         const didPersist = options.skipPersist ? true : await persistSessions();
@@ -1852,6 +2077,7 @@
         const removedCount = state.sessions.length;
         if (state.speechProvider) state.speechProvider.stop();
         stopTimer();
+        state.sessions.forEach((session) => clearSessionAuditDebounceState(session.id));
         state.sessions = [];
         state.historySelectedSessionId = null;
         state.historyEditMode = false;
@@ -1956,6 +2182,16 @@
         const shouldShowFeedback = options.showFeedback !== false;
         if (!state.settings.secureStorageEnabled && !hasLockedSessionEnvelope()) return;
         stopActiveSessionForLock();
+        if (state.activeSession) {
+          appendAuditEvent(
+            state.activeSession,
+            'secure-lock',
+            'App lock engaged.',
+            { reason: reason || 'manual' },
+            reason === 'manual' ? 'user' : 'system'
+          );
+          upsertSession(state.activeSession);
+        }
         state.sessionLock.isLocked = true;
         state.sessionLock.unlockMode = getEffectiveSecureStorageMode();
         state.sessionLock.lockedReason = reason || 'manual';
@@ -1981,6 +2217,11 @@
       }
 
       function unlockSessionUi() {
+        if (state.activeSession) {
+          appendAuditEvent(state.activeSession, 'secure-unlock', 'App unlocked.', { mode: getEffectiveSecureStorageMode() }, 'user');
+          upsertSession(state.activeSession);
+          persistSessionsDebounced();
+        }
         state.sessionLock.isLocked = false;
         state.sessionLock.lockedReason = null;
         state.sessionLock.unlockMode = getEffectiveSecureStorageMode();
@@ -2156,7 +2397,12 @@
         secureStorage: createSecureStorageRuntimeState(),
         sessionLock: createSessionLockState(),
         destructiveConfirm: createDestructiveConfirmState(),
-        sessionPersistToken: null
+        sessionPersistToken: null,
+        auditDebounce: {
+          manualNotesTimers: {},
+          transcriptEditTimers: {},
+          manualNotesSignatures: {}
+        }
       };
 
       const refs = {
@@ -3054,7 +3300,7 @@
         if (state.currentTab === 'history' && state.historySelectedSessionId === sessionId) renderHistoryDetail();
       }
 
-      function applyGeneratedSummary(sessionId, requestToken, summaryText, promptTemplate, transcriptSource) {
+      function applyGeneratedSummary(sessionId, requestToken, summaryText, promptTemplate, transcriptSource, options = {}) {
         if (state.summaryRequestTokens[sessionId] !== requestToken) return null;
         const refreshedSession = findSession(sessionId);
         if (!refreshedSession) return null;
@@ -3066,11 +3312,21 @@
         refreshedSession.summaryPrompt = promptTemplate;
         refreshedSession.summarySignature = transcriptSource;
         refreshedSession.updatedAt = Date.now();
+        appendAuditEvent(
+          refreshedSession,
+          'summary-generated',
+          'Summary generated.',
+          {
+            summaryCharacters: String(summaryText || '').length,
+            transcriptCharacters: String(transcriptSource || '').length
+          },
+          options.actor === 'user' ? 'user' : 'system'
+        );
         upsertSession(refreshedSession);
         persistSessions();
         renderSummaryViewsForSession(refreshedSession.id);
         if (refreshedSession.structuredDataStatus === 'idle' && !hasStructuredDataContent(refreshedSession.structuredData)) {
-          void refreshSessionStructuredData(refreshedSession.id, { force: true, showFeedback: false });
+          void refreshSessionStructuredData(refreshedSession.id, { force: true, showFeedback: false, auditActor: 'system', auditSource: 'auto-summary' });
         }
         return refreshedSession;
       }
@@ -3229,6 +3485,10 @@
         if (!session) return null;
         const force = Boolean(options.force);
         const showFeedback = options.showFeedback !== false;
+        const auditActor = options.auditActor === 'user' || options.auditActor === 'system'
+          ? options.auditActor
+          : (showFeedback ? 'user' : 'system');
+        const auditSource = options.auditSource || 'manual';
         if (session.structuredDataStatus === 'generating') return session;
         if (!force && session.structuredDataStatus === 'ready' && hasStructuredDataContent(session.structuredData)) return session;
 
@@ -3249,6 +3509,14 @@
           refreshedSession.structuredDataStatus = 'ready';
           refreshedSession.structuredDataError = '';
           refreshedSession.updatedAt = Date.now();
+          const totalItems = STRUCTURED_DATA_FIELDS.reduce((count, field) => count + (Array.isArray(extracted[field.key]) ? extracted[field.key].length : 0), 0);
+          appendAuditEvent(
+            refreshedSession,
+            'structured-extraction-run',
+            totalItems > 0 ? 'Structured extraction completed.' : 'Structured extraction completed with no confidently extracted items.',
+            { source: auditSource, totalItems },
+            auditActor
+          );
           upsertSession(refreshedSession);
           persistSessionsDebounced();
           renderStructuredViewsForSession(refreshedSession.id);
@@ -3260,6 +3528,13 @@
           refreshedSession.structuredDataStatus = 'error';
           refreshedSession.structuredDataError = 'Structured extraction failed: ' + normaliseWhitespace(error && error.message ? error.message : String(error || 'Unknown error'));
           refreshedSession.updatedAt = Date.now();
+          appendAuditEvent(
+            refreshedSession,
+            'structured-extraction-run',
+            'Structured extraction failed.',
+            { source: auditSource },
+            auditActor
+          );
           upsertSession(refreshedSession);
           persistSessionsDebounced();
           renderStructuredViewsForSession(refreshedSession.id);
@@ -3843,6 +4118,7 @@
 
         const transcriptSource = getTranscriptSummarySource(session);
         const requestPrompt = getDocumentTemplatePrompt(template, session, transcriptSource);
+        const auditActor = options.auditActor === 'system' ? 'system' : 'user';
         let sessionHandle = null;
         state.documentGenerationRequest = {
           sessionId: session.id,
@@ -3886,6 +4162,17 @@
           }
 
           refreshedSession.updatedAt = nextTimestamp;
+          appendAuditEvent(
+            refreshedSession,
+            'document-generated',
+            existingDocument ? 'Document regenerated from template.' : 'Document generated from template.',
+            {
+              templateId: template.id,
+              templateName: template.name,
+              action: existingDocument ? 'updated' : 'created'
+            },
+            auditActor
+          );
           upsertSession(refreshedSession);
           const generatedDocument = (refreshedSession.documents || []).find((documentItem) => documentItem.templateId === template.id) || null;
           setSelectedDocument(generatedDocument ? generatedDocument.id : null);
@@ -3916,6 +4203,9 @@
         const status = getEffectiveSummaryStatus(session);
         const force = Boolean(options.force);
         const showFeedback = options.showFeedback !== false;
+        const auditActor = options.auditActor === 'user' || options.auditActor === 'system'
+          ? options.auditActor
+          : (force ? 'user' : 'system');
 
         if (!hasAiSummarySupport()) {
           if (showFeedback) showToast('On-device AI summarisation is not available in this browser.', 'warning', 4200);
@@ -3938,7 +4228,7 @@
         try {
           const summaryText = await buildChunkedSummary(session, promptTemplate);
           if (!normaliseWhitespace(summaryText)) throw new Error('The browser returned an empty summary.');
-          applyGeneratedSummary(session.id, requestToken, summaryText, promptTemplate, transcriptSource);
+          applyGeneratedSummary(session.id, requestToken, summaryText, promptTemplate, transcriptSource, { actor: auditActor });
           if (showFeedback) showToast('Summary generated.', 'success', 2200);
         } catch (error) {
           applySummaryGenerationError(session.id, requestToken, error);
@@ -3970,7 +4260,10 @@
         state.activeSession.clinicianName = values.clinicianName;
         state.activeSession.consultationType = values.consultationType;
         state.activeSession.manualNotes = values.manualNotes;
-        if (manualNotesChanged) state.activeSession.manualNotesUpdatedAt = Date.now();
+        if (manualNotesChanged) {
+          state.activeSession.manualNotesUpdatedAt = Date.now();
+          queueManualNotesAuditEvent(state.activeSession.id, 'consultation');
+        }
         state.activeSession.tags = dedupeStrings(values.tags);
         state.activeSession.updatedAt = Date.now();
         upsertSession(state.activeSession);
@@ -3988,10 +4281,12 @@
         const now = Date.now();
         const formValues = readConsultationForm();
         const session = createSession({ patientName: formValues.patientName, clinicianName: formValues.clinicianName, consultationType: formValues.consultationType, manualNotes: formValues.manualNotes, manualNotesUpdatedAt: normaliseWhitespace(formValues.manualNotes) ? now : null, tags: formValues.tags.slice(), status, startedAt: now, createdAt: now, updatedAt: now, elapsedMs: 0, lastStartedSegmentAt: null, stoppedAt: status === 'stopped' ? now : null, ephemeral: Boolean(state.settings.ephemeralConsultationMode) });
+        appendAuditEvent(session, 'session-created', 'Session created.', { status, ephemeral: Boolean(session.ephemeral) }, 'user');
         state.activeSession = session;
         state.selectedDocumentId = null;
         state.consultationDraftTags = formValues.tags.slice();
         upsertSession(session);
+        state.auditDebounce.manualNotesSignatures[session.id] = normaliseWhitespace(session.manualNotes || '');
         return session;
       }
 
@@ -4179,7 +4474,7 @@
         return entries.filter((entry) => entry.isImportantMarker || String(entry.text || '').toLowerCase().includes(query));
       }
 
-      function handleTranscriptEntryUpdate(sessionId, entryId, newText, persistImmediately = false) {
+      function handleTranscriptEntryUpdate(sessionId, entryId, newText, persistImmediately = false, source = 'consultation') {
         const session = findSession(sessionId);
         if (!session) return;
         const entry = session.transcriptEntries.find((item) => item.id === entryId);
@@ -4188,6 +4483,7 @@
         entry.lastUpdatedAt = Date.now();
         session.updatedAt = Date.now();
         upsertSession(session);
+        queueTranscriptEditAuditEvent(session.id, entry.id, source);
         if (persistImmediately) persistSessionsDebounced();
         if (state.activeSession && state.activeSession.id === session.id) {
           renderConsultationChrome();
@@ -4258,7 +4554,7 @@
           renderInterim();
           return;
         }
-        renderTranscriptEntries(refs.transcriptContainer, session, { searchTerm: state.transcriptSearch, editable: session.status === 'stopped', emptyMessage: 'Transcript entries will appear as timestamped blocks.', onEntryChange: (entryId, newText) => handleTranscriptEntryUpdate(session.id, entryId, newText, true) });
+        renderTranscriptEntries(refs.transcriptContainer, session, { searchTerm: state.transcriptSearch, editable: session.status === 'stopped', emptyMessage: 'Transcript entries will appear as timestamped blocks.', onEntryChange: (entryId, newText) => handleTranscriptEntryUpdate(session.id, entryId, newText, true, 'consultation') });
         renderInterim();
       }
 
@@ -4383,6 +4679,7 @@
             session.updatedAt = Date.now();
             upsertSession(session);
             syncConsultationViewForSession(session);
+            queueManualNotesAuditEvent(session.id, 'history');
             persistSessionsDebounced();
           });
         }
@@ -4391,6 +4688,28 @@
           searchInput.addEventListener('input', () => {
             state.historyDetailSearch = searchInput.value;
             renderHistoryDetail();
+          });
+        }
+        const copyAuditButton = detailRoot.querySelector('#historyCopyAuditTextBtn');
+        if (copyAuditButton) {
+          copyAuditButton.addEventListener('click', () => {
+            copyToClipboard(buildAuditLogText(session))
+              .then(() => showToast('Audit log copied to clipboard.', 'success', 2200))
+              .catch(() => showToast('Copy failed in this browser context.', 'error', 3200));
+          });
+        }
+        const exportAuditTextButton = detailRoot.querySelector('#historyExportAuditTextBtn');
+        if (exportAuditTextButton) {
+          exportAuditTextButton.addEventListener('click', () => {
+            exportSessionAuditLog(session, 'text');
+            showToast('Audit log exported as text.', 'success', 2200);
+          });
+        }
+        const exportAuditJsonButton = detailRoot.querySelector('#historyExportAuditJsonBtn');
+        if (exportAuditJsonButton) {
+          exportAuditJsonButton.addEventListener('click', () => {
+            exportSessionAuditLog(session, 'json');
+            showToast('Audit log exported as JSON.', 'success', 2200);
           });
         }
         const summaryButton = detailRoot.querySelector('#historyGenerateSummaryBtn');
@@ -4535,12 +4854,14 @@
           '<div class="field"><span class="label">Consultation Type</span>' + (editable ? '<input data-history-field="consultationType" value="' + escapeAttribute(session.consultationType || '') + '" />' : '<div class="static-value">' + escapeHtml(session.consultationType || '-') + '</div>') + '</div>' +
           '</div>' +
           '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Metadata</h4><div class="subtle-note">Started ' + escapeHtml(formatDateTime(session.startedAt || session.createdAt)) + ' • Duration ' + escapeHtml(formatDuration(getSessionElapsedMs(session))) + ' • Updated ' + escapeHtml(formatDateTime(session.updatedAt)) + '</div></div><div class="inline-actions"><span class="status-pill ' + escapeAttribute(session.status) + '">' + escapeHtml(titleCaseStatus(session.status)) + '</span>' + (session.archived ? '<span class="archived-badge">Archived</span>' : '') + '</div></div><div class="tag-selector" id="historyTagList"></div></div>' +
+          '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Audit log</h4><div class="subtle-note">Append-only local timeline of important user and system actions.</div></div><div class="inline-actions"><button class="btn small" type="button" id="historyCopyAuditTextBtn">Copy log</button><button class="btn small" type="button" id="historyExportAuditTextBtn">Export .txt</button><button class="btn small" type="button" id="historyExportAuditJsonBtn">Export .json</button></div></div><div class="summary-output audit-output" id="historyAuditContainer"></div></div>' +
           '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Review mode</h4><div class="subtle-note" id="historyReviewMeta"></div></div><div class="inline-actions"><button class="btn small" type="button" id="historyReviewLowConfidenceToggle">' + escapeHtml(state.reviewMode.historyLowConfidenceOnly ? 'Show all transcript blocks' : 'Show low-confidence only') + '</button></div></div><div class="review-mode-container" id="historyReviewContainer"></div></div>' +
           '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Manual notes</h4><div class="subtle-note">Editable when history detail is in edit mode.</div></div></div>' + (editable ? '<textarea id="historyNotesEditor" class="manual-notes" style="min-height:140px;">' + escapeHtml(session.manualNotes || '') + '</textarea>' : '<div class="note-preview">' + escapeHtml(session.manualNotes || 'No manual notes.').replace(/\n/g, '<br>') + '</div>') + '</div>' +
           '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Structured view</h4><div class="subtle-note" id="historyStructuredMeta"></div></div><div class="inline-actions"><button class="btn small" type="button" id="historyExtractStructuredBtn">' + escapeHtml(session.structuredDataStatus === 'generating' ? 'Extracting...' : 'Extract structured items') + '</button></div></div><div class="structured-output" id="historyStructuredContainer"></div></div>' +
           '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Session documents</h4><div class="subtle-note" id="historyDocumentMeta"></div></div><div class="inline-actions"><div class="field" style="margin:0; min-width:220px;"><label class="label" for="historySessionAssetSelect">Show document</label><select id="historySessionAssetSelect"></select></div>' + (canShowDocuments ? '<div class="field" style="margin:0; min-width:220px;"><label class="label" for="historyDocumentTemplateSelect">Generate type</label><select id="historyDocumentTemplateSelect"></select></div><button class="btn small secondary" type="button" id="historyGenerateDocumentBtn">Generate Document</button>' : '') + '<button class="btn small" type="button" id="historyGenerateSummaryBtn">Generate Summary</button></div></div><div class="summary-output" id="historyDocumentContainer"></div></div>' +
           '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Transcript</h4><div class="subtle-note">' + (editable && !state.historyDetailSearch ? 'Stopped transcripts can be corrected inline.' : 'Search to filter transcript segments.') + '</div></div><input id="historyDetailSearch" class="search-input" type="search" placeholder="Search within this transcript..." value="' + escapeAttribute(state.historyDetailSearch || '') + '" /></div><div class="transcript-container history-transcript" id="historyTranscriptContainer"></div></div>';
         renderHistoryTags(detail.querySelector('#historyTagList'), session, editable);
+        detail.querySelector('#historyAuditContainer').innerHTML = buildAuditTimelineHtml(session);
         detail.querySelector('#historyReviewMeta').textContent = getReviewModeMetaText(session);
         detail.querySelector('#historyReviewContainer').innerHTML = buildReviewModePanelHtml(session, 'history');
         detail.querySelector('#historyStructuredMeta').textContent = getStructuredDataStatusText(session);
@@ -4564,14 +4885,8 @@
         const historyGenerateDocumentBtn = detail.querySelector('#historyGenerateDocumentBtn');
         if (historyGenerateDocumentBtn) updateDocumentGenerateButton(historyGenerateDocumentBtn, hasPromptApiSupport() && Boolean(getDocumentTemplates().length) && !isDocumentGenerationBusy(), isDocumentGenerationBusy());
         renderTranscriptEntries(detail.querySelector('#historyTranscriptContainer'), session, { searchTerm: state.historyDetailSearch, editable: editable && session.status === 'stopped', emptyMessage: 'This session does not yet contain transcript segments.', onEntryChange: (entryId, newText) => {
-          const entry = session.transcriptEntries.find((item) => item.id === entryId);
-          if (!entry) return;
-          entry.text = newText;
-          entry.lastUpdatedAt = Date.now();
-          session.updatedAt = Date.now();
-          upsertSession(session);
+          handleTranscriptEntryUpdate(session.id, entryId, newText, true, 'history');
           syncConsultationViewForSession(session);
-          persistSessionsDebounced();
           renderHistoryDetail();
         } });
         renderDocumentsTab();
@@ -4816,6 +5131,7 @@
       function transitionSessionStatus(session, nextStatus, options = {}) {
         if (!session) return;
         const now = Date.now();
+        const previousStatus = session.status;
         const shouldStartClock = Boolean(options.startClock);
         if (session.status === 'listening' && session.lastStartedSegmentAt && !(nextStatus === 'listening' && shouldStartClock)) session.elapsedMs += Math.max(0, now - session.lastStartedSegmentAt);
         if (nextStatus === 'listening') {
@@ -4833,6 +5149,17 @@
           if (nextStatus === 'listening' && session.lastStartedSegmentAt) ensureTimerRunning();
           else stopTimer();
           renderConsultationChrome();
+        }
+        if (nextStatus !== previousStatus) {
+          if (nextStatus === 'listening' && previousStatus === 'paused') {
+            appendAuditEvent(session, 'listening-resumed', 'Listening resumed.', { from: previousStatus, to: nextStatus }, 'user');
+          } else if (nextStatus === 'listening') {
+            appendAuditEvent(session, 'listening-started', 'Listening started.', { from: previousStatus, to: nextStatus }, 'user');
+          } else if (nextStatus === 'paused') {
+            appendAuditEvent(session, 'listening-paused', 'Listening paused.', { from: previousStatus, to: nextStatus }, 'user');
+          } else if (nextStatus === 'stopped') {
+            appendAuditEvent(session, 'listening-stopped', 'Listening stopped.', { from: previousStatus, to: nextStatus }, 'user');
+          }
         }
         if (!options.skipPersist) persistSessionsDebounced();
       }
@@ -4905,9 +5232,14 @@
         refs.transcriptSearch.value = '';
         state.transcriptSearch = '';
         let session = state.activeSession;
-        if (!session || session.status === 'stopped' || session.archived) session = createSessionFromConsultation('listening');
+        let createdSession = false;
+        if (!session || session.status === 'stopped' || session.archived) {
+          session = createSessionFromConsultation('listening');
+          createdSession = true;
+        }
         else syncActiveSessionFromForm();
         transitionSessionStatus(session, 'listening', { startClock: false, skipPersist: true });
+        if (createdSession) appendAuditEvent(session, 'listening-started', 'Listening started.', { from: 'created', to: 'listening' }, 'user');
         renderConsultation();
         persistSessions();
         state.speechProvider.start(session.id);
@@ -4948,6 +5280,7 @@
         syncActiveSessionFromForm();
         const now = Date.now();
         state.activeSession.transcriptEntries.push(createTranscriptEntry({ text: '', timestamp: now, isImportantMarker: true, confidence: null, flags: { isImportantMarker: true } }));
+        appendAuditEvent(state.activeSession, 'important-marker-added', 'Important moment marker added.', { transcriptEntries: state.activeSession.transcriptEntries.length }, 'user');
         state.activeSession.updatedAt = now;
         upsertSession(state.activeSession);
         renderConsultationSummary();
@@ -5016,6 +5349,7 @@
           return createTranscriptEntry(Object.assign({}, deepClone(entry), { id: uid('entry'), timestamp: newStartedAt + offset, lastUpdatedAt: now }));
         });
         const duplicated = createSession(Object.assign({}, deepClone(original), { id: uid('session'), createdAt: now, updatedAt: now, startedAt: newStartedAt, stoppedAt: newStoppedAt, lastStartedSegmentAt: null, elapsedMs: duration, transcriptEntries: duplicatedEntries, archived: false, archivedAt: null, status: 'stopped' }));
+        appendAuditEvent(duplicated, 'session-created', 'Session duplicated from existing record.', { sourceSessionId: original.id }, 'user');
         upsertSession(duplicated);
         state.historySelectedSessionId = duplicated.id;
         state.historyEditMode = false;
@@ -5029,6 +5363,7 @@
         if (!session) return;
         session.archived = !session.archived;
         session.archivedAt = session.archived ? Date.now() : null;
+        appendAuditEvent(session, session.archived ? 'session-archived' : 'session-restored', session.archived ? 'Session archived.' : 'Session restored from archive.', null, 'user');
         session.updatedAt = Date.now();
         upsertSession(session);
         const didPersist = await persistSessions();
@@ -5040,6 +5375,8 @@
         const session = findSession(sessionId);
         if (!session) return;
         if (!window.confirm('Permanently delete ' + (session.patientName || 'this session') + '? This cannot be undone.')) return;
+        appendAuditEvent(session, 'session-deleted', 'Session deleted permanently.', null, 'user');
+        clearSessionAuditDebounceState(sessionId);
         if (state.activeSession && state.activeSession.id === sessionId) {
           if (state.speechProvider) state.speechProvider.stop();
           stopTimer();
@@ -5180,9 +5517,16 @@
           const session = getDocumentTargetSession();
           const documentItem = getSelectedSessionDocument(session);
           if (!session || !documentItem) return;
-          documentItem.content = sanitizeRichTextMarkup(refs.documentPreview.innerHTML);
+          const sanitized = sanitizeRichTextMarkup(refs.documentPreview.innerHTML);
+          if (sanitized === documentItem.content) return;
+          documentItem.content = sanitized;
           documentItem.updatedAt = Date.now();
           session.updatedAt = Date.now();
+          appendAuditEvent(session, 'document-edited', 'Document content edited.', {
+            documentId: documentItem.id,
+            templateId: documentItem.templateId,
+            title: documentItem.title || documentItem.templateName || 'Document'
+          }, 'user');
           upsertSession(session);
           persistSessionsDebounced();
           renderConsultationDocuments();
