@@ -24,6 +24,9 @@ This project explores a different approach:
 - Rich text document drafting from transcript content using configurable templates.
 - Client-side FHIR R4 Bundle export for the active session or a selected history session.
 - Session history with review, edit, duplicate, archive, and delete workflows.
+- Optional encrypted session storage at rest using the browser Web Crypto API.
+- App-level lock and unlock controls with inactivity auto-lock for sensitive session content.
+- Explicit privacy controls for retention, purge-on-close, ephemeral consultations, and destructive local deletion.
 - Local customisation for organisation name, colour, snippets, tags, and document templates.
 - Local persistence through browser storage.
 
@@ -180,7 +183,16 @@ What that means in practice:
 
 ### Storage
 
-Sessions, notes, settings, customisation, summaries, and generated documents are persisted in browser local storage only. FHIR exports are generated on demand for download and are not persisted by the app unless the user chooses to keep the downloaded file.
+Sessions, notes, settings, customisation, summaries, and generated documents are handled in-browser only. By default, local data is stored in browser local storage. FHIR exports are generated on demand for download and are not persisted by the app unless the user chooses to keep the downloaded file.
+
+The app now also supports optional local privacy protections for session data:
+
+- Encrypted storage at rest for saved session history using AES-GCM via the browser Web Crypto API.
+- Passphrase unlock mode, which allows encrypted history to be reopened after refresh.
+- Session-only key mode, which keeps the key in memory only and makes encrypted history unavailable after refresh.
+- App-level lock and unlock behaviour, including automatic locking after inactivity.
+- Ephemeral consultation mode for memory-only sessions until the user explicitly saves them.
+- Retention-based cleanup, delete archived sessions, delete all sessions, and best-effort purge on browser close.
 
 ## Privacy
 
@@ -188,6 +200,9 @@ This app does not send transcript, summary, document, or FHIR export data to any
 Additional notes:
 
 - Session data is stored locally in the browser.
+- Saved session history can optionally be encrypted before it is written to local storage.
+- Sensitive consultation content can be hidden behind an in-app lock screen while the tab remains open.
+- Local deletion and retention controls are user-driven and happen in the browser only.
 - The initial built-in model download is managed by Chrome, not by this app.
 - Speech transcription uses the browser's speech recognition engine. If you need a stricter privacy statement for transcription itself, verify the behaviour of that browser feature in your target deployment environment before making broader claims.
 
