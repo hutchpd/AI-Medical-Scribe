@@ -25,6 +25,16 @@
         ],
         text: 'Consult note'
       };
+      const STRUCTURED_DATA_FIELDS = [
+        { key: 'problems', label: 'Problems', placeholder: 'One problem per line' },
+        { key: 'medications', label: 'Medications', placeholder: 'One medication per line' },
+        { key: 'allergies', label: 'Allergies', placeholder: 'One allergy per line' },
+        { key: 'investigations', label: 'Investigations', placeholder: 'One investigation per line' },
+        { key: 'followUpActions', label: 'Follow-up actions', placeholder: 'One follow-up action per line' },
+        { key: 'diagnoses', label: 'Diagnoses', placeholder: 'One diagnosis per line' },
+        { key: 'safetyNetting', label: 'Safety netting', placeholder: 'One safety-netting item per line' },
+        { key: 'adminTasks', label: 'Admin tasks', placeholder: 'One admin task per line' }
+      ];
 
       const $ = (id) => document.getElementById(id);
 
@@ -569,23 +579,227 @@
           .join('\n');
       }
 
-      function extractStructuredLinesByKeywords(sourceText, keywords) {
-        const source = String(sourceText || '');
-        if (!source) return [];
-        return dedupeStrings(source.split('\n')
-          .map((line) => String(line || '').trim())
-          .filter(Boolean)
-          .filter((line) => keywords.some((keyword) => new RegExp('\\b' + escapeRegExp(keyword) + '\\b', 'i').test(line)))
-          .map((line) => line.replace(/^[-*•]\s*/, '').trim()));
+      function createEmptyStructuredData() {
+        return STRUCTURED_DATA_FIELDS.reduce((accumulator, field) => {
+          accumulator[field.key] = [];
+          return accumulator;
+        }, {});
+      }
+
+      function cleanStructuredItemText(value) {
+        return String(value || '')
+          .replace(/^[-*•\d.()\s]+/, '')
+          .replace(/^\s*(subjective|examination|assessment|plan)\s*:\s*/i, '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .replace(/[.;:,\s]+$/, '')
+          .trim();
+      }
+
+      function isMeaningfulStructuredItem(value) {
+        const item = cleanStructuredItemText(value).toLowerCase();
+        if (!item) return false;
+        if (['not stated', 'none', 'nil', 'n/a', 'na', 'unknown'].includes(item)) return false;
+        if (item.length < 3 && item !== 'nkda') return false;
+        return true;
+      }
+
+      function normalizeStructuredDataItems(items) {
+        return dedupeStrings((Array.isArray(items) ? items : [])
+          .map((item) => cleanStructuredItemText(item))
+          .filter((item) => isMeaningfulStructuredItem(item)));
+      }
+
+      function normalizeStructuredData(value) {
+        const source = value && typeof value === 'object' ? value : {};
+        return STRUCTURED_DATA_FIELDS.reduce((accumulator, field) => {
+          accumulator[field.key] = normalizeStructuredDataItems(source[field.key]);
+          return accumulator;
+        }, createEmptyStructuredData());
+      }
+
+      function hasStructuredDataContent(value) {
+        return STRUCTURED_DATA_FIELDS.some((field) => Array.isArray(value && value[field.key]) && value[field.key].length);
+      }
+
+      function splitStructuredEditorValue(value) {
+        return normalizeStructuredDataItems(String(value || '')
+          .replace(/\r/g, '')
+          .split('\n')
+          .flatMap((line) => line.split(/\s*[;,]\s*/)));
+      }
+
+      function splitTextIntoExtractionCandidates(sourceText) {
+        const source = String(sourceText || '').replace(/\r/g, '\n');
+        if (!normaliseWhitespace(source)) return [];
+        const lineCandidates = source.split('\n').map((line) => line.trim()).filter(Boolean);
+        const sentenceCandidates = source
+          .replace(/\n+/g, ' ')
+          .split(/(?<=[.!?])\s+(?=[A-Z0-9])/)
+          .map((sentence) => sentence.trim())
+          .filter(Boolean);
+        return dedupeStrings(lineCandidates.concat(sentenceCandidates))
+          .map((item) => cleanStructuredItemText(item))
+          .filter((item) => isMeaningfulStructuredItem(item) && item.length <= 180);
+      }
+
+      function extractLabelValue(line, labels) {
+        const source = String(line || '').trim();
+        if (!source || !Array.isArray(labels) || !labels.length) return null;
+        const pattern = new RegExp('^(?:' + labels.map((label) => escapeRegExp(label)).join('|') + ')\\s*[:\\-]\\s*(.+)$', 'i');
+        const match = source.match(pattern);
+        return match ? match[1] : null;
+      }
+
+      function splitLabeledStructuredItems(value) {
+        return normalizeStructuredDataItems(String(value || '')
+          .split(/\s*(?:;|,|\band\b)\s*/i)
+          .map((item) => item.trim()));
+      }
+
+      function extractStructuredBucketFromText(sourceText, options = {}) {
+        const candidates = splitTextIntoExtractionCandidates(sourceText);
+        if (!candidates.length) return [];
+        const labels = Array.isArray(options.labels) ? options.labels : [];
+        const keywords = Array.isArray(options.keywords) ? options.keywords : [];
+        const exactPhrases = Array.isArray(options.exactPhrases) ? options.exactPhrases : [];
+        const items = [];
+
+        candidates.forEach((candidate) => {
+          const labeledValue = extractLabelValue(candidate, labels);
+          if (labeledValue) {
+            items.push.apply(items, splitLabeledStructuredItems(labeledValue));
+            return;
+          }
+          const matchesKeyword = keywords.some((keyword) => new RegExp('\\b' + escapeRegExp(keyword) + '\\b', 'i').test(candidate));
+          const matchesPhrase = exactPhrases.some((phrase) => candidate.toLowerCase().includes(String(phrase).toLowerCase()));
+          if (matchesKeyword || matchesPhrase) items.push(candidate);
+        });
+
+        return normalizeStructuredDataItems(items);
+      }
+
+      function extractProblemsFromText(sourceText) {
+        return extractStructuredBucketFromText(sourceText, {
+          labels: ['problem', 'problems', 'condition', 'conditions', 'issue', 'issues', 'pmh', 'past medical history'],
+          keywords: ['problem', 'condition', 'history of', 'consistent with']
+        });
+      }
+
+      function extractDiagnosesFromText(sourceText) {
+        return extractStructuredBucketFromText(sourceText, {
+          labels: ['diagnosis', 'diagnoses', 'dx', 'impression', 'assessment'],
+          keywords: ['diagnosis', 'diagnosed', 'impression', 'likely', 'consistent with']
+        });
+      }
+
+      function extractMedicationsFromText(sourceText) {
+        return extractStructuredBucketFromText(sourceText, {
+          labels: ['medication', 'medications', 'medicine', 'medicines', 'rx'],
+          keywords: ['mg', 'mcg', 'ml', 'tablet', 'capsule', 'inhaler', 'insulin', 'prescribed', 'continue', 'cease', 'start']
+        });
+      }
+
+      function extractAllergiesFromText(sourceText) {
+        return extractStructuredBucketFromText(sourceText, {
+          labels: ['allergy', 'allergies'],
+          keywords: ['allergic', 'allergy', 'nkda', 'adverse reaction']
+        });
+      }
+
+      function extractInvestigationsFromText(sourceText) {
+        return extractStructuredBucketFromText(sourceText, {
+          labels: ['investigation', 'investigations', 'tests', 'test ordered', 'imaging'],
+          keywords: ['test', 'investigation', 'scan', 'x-ray', 'xray', 'ultrasound', 'mri', 'ct', 'blood', 'pathology', 'ecg', 'ekg', 'swab', 'culture']
+        });
+      }
+
+      function extractFollowUpActionsFromText(sourceText) {
+        return extractStructuredBucketFromText(sourceText, {
+          labels: ['follow-up', 'follow up', 'review', 'next steps'],
+          keywords: ['follow-up', 'follow up', 'review', 'return', 'monitor', 'recheck', 'recall', 'book', 'appointment']
+        });
+      }
+
+      function extractSafetyNettingFromText(sourceText) {
+        return extractStructuredBucketFromText(sourceText, {
+          labels: ['safety netting', 'safety-netting', 'red flags'],
+          keywords: ['safety net', 'safety-net', 'red flag', 'seek urgent', 'urgent review', 'present to ed', 'emergency department', 'call ambulance']
+        });
+      }
+
+      function extractAdminTasksFromText(sourceText) {
+        return extractStructuredBucketFromText(sourceText, {
+          labels: ['admin', 'administration', 'paperwork', 'tasks'],
+          keywords: ['certificate', 'form', 'paperwork', 'referral', 'letter', 'workers comp', 'workcover', 'booking', 'booked']
+        });
+      }
+
+      function extractStructuredDataFromSession(session) {
+        const summaryText = String(session && session.summary || '');
+        const manualNotesText = String(session && session.manualNotes || '');
+        const transcriptText = buildTranscriptPlainText(session);
+        const parsedSummary = normaliseWhitespace(summaryText) ? parseStructuredSummary(summaryText) : null;
+        const subjectiveText = parsedSummary ? (parsedSummary.Subjective || []).join('\n') : '';
+        const assessmentText = parsedSummary ? (parsedSummary.Assessment || []).join('\n') : '';
+        const planText = parsedSummary ? (parsedSummary.Plan || []).join('\n') : '';
+        const combinedNotesText = [manualNotesText, transcriptText].filter((text) => normaliseWhitespace(text)).join('\n');
+
+        return normalizeStructuredData({
+          problems: normalizeStructuredDataItems([].concat(
+            parsedSummary ? parsedSummary.Assessment || [] : [],
+            extractProblemsFromText(combinedNotesText)
+          )),
+          medications: normalizeStructuredDataItems([].concat(
+            extractMedicationsFromText(planText),
+            extractMedicationsFromText(combinedNotesText)
+          )),
+          allergies: normalizeStructuredDataItems([].concat(
+            extractAllergiesFromText(subjectiveText),
+            extractAllergiesFromText(combinedNotesText)
+          )),
+          investigations: normalizeStructuredDataItems([].concat(
+            extractInvestigationsFromText(planText),
+            extractInvestigationsFromText(combinedNotesText)
+          )),
+          followUpActions: normalizeStructuredDataItems([].concat(
+            extractFollowUpActionsFromText(planText),
+            extractFollowUpActionsFromText(combinedNotesText)
+          )),
+          diagnoses: normalizeStructuredDataItems([].concat(
+            extractDiagnosesFromText(assessmentText),
+            extractDiagnosesFromText(combinedNotesText)
+          )),
+          safetyNetting: normalizeStructuredDataItems([].concat(
+            extractSafetyNettingFromText(planText),
+            extractSafetyNettingFromText(combinedNotesText)
+          )),
+          adminTasks: normalizeStructuredDataItems([].concat(
+            extractAdminTasksFromText(planText),
+            extractAdminTasksFromText(combinedNotesText)
+          ))
+        });
+      }
+
+      function getEffectiveStructuredData(session) {
+        const stored = normalizeStructuredData(session && session.structuredData);
+        if (session && session.structuredDataStatus === 'idle' && !hasStructuredDataContent(stored)) {
+          return extractStructuredDataFromSession(session);
+        }
+        return stored;
       }
 
       function extractFhirStructuredItems(session) {
-        const source = buildStructuredExtractionSource(session);
+        const structuredData = getEffectiveStructuredData(session);
         return {
-          problems: extractStructuredLinesByKeywords(source, ['diagnosis', 'diagnosed', 'problem', 'condition', 'assessment', 'impression', 'likely', 'consistent with']),
-          medications: extractStructuredLinesByKeywords(source, ['medication', 'medicine', 'tablet', 'capsule', 'dose', 'mg', 'mcg', 'ml', 'inhaler', 'insulin', 'prescribed', 'continue', 'cease', 'start']),
-          followUpActions: extractStructuredLinesByKeywords(source, ['follow-up', 'follow up', 'review', 'return', 'monitor', 'safety-net', 'safety net', 'recheck', 'recall']),
-          investigations: extractStructuredLinesByKeywords(source, ['test', 'investigation', 'scan', 'x-ray', 'xray', 'ultrasound', 'mri', 'ct', 'blood', 'pathology', 'ecg'])
+          problems: normalizeStructuredDataItems([].concat(structuredData.problems, structuredData.diagnoses)),
+          medications: normalizeStructuredDataItems(structuredData.medications),
+          followUpActions: normalizeStructuredDataItems(structuredData.followUpActions),
+          investigations: normalizeStructuredDataItems(structuredData.investigations),
+          allergies: normalizeStructuredDataItems(structuredData.allergies),
+          diagnoses: normalizeStructuredDataItems(structuredData.diagnoses),
+          safetyNetting: normalizeStructuredDataItems(structuredData.safetyNetting),
+          adminTasks: normalizeStructuredDataItems(structuredData.adminTasks)
         };
       }
 
@@ -1139,6 +1353,8 @@
         const now = Date.now();
         const status = overrides.status || 'stopped';
         const summaryStatus = ['idle', 'generating', 'ready', 'error'].includes(overrides.summaryStatus) ? overrides.summaryStatus : 'idle';
+        const structuredDataStatus = ['idle', 'generating', 'ready', 'error'].includes(overrides.structuredDataStatus) ? overrides.structuredDataStatus : 'idle';
+        const manualNotesValue = String(overrides.manualNotes || '');
         return {
           id: overrides.id || uid('session'),
           patientName: overrides.patientName || '',
@@ -1151,7 +1367,8 @@
           lastStartedSegmentAt: typeof overrides.lastStartedSegmentAt === 'number' ? overrides.lastStartedSegmentAt : null,
           elapsedMs: typeof overrides.elapsedMs === 'number' ? overrides.elapsedMs : 0,
           transcriptEntries: Array.isArray(overrides.transcriptEntries) ? overrides.transcriptEntries.map((entry) => createTranscriptEntry(entry)) : [],
-          manualNotes: overrides.manualNotes || '',
+          manualNotes: manualNotesValue,
+          manualNotesUpdatedAt: typeof overrides.manualNotesUpdatedAt === 'number' ? overrides.manualNotesUpdatedAt : (normaliseWhitespace(manualNotesValue) ? now : null),
           tags: Array.isArray(overrides.tags) ? dedupeStrings(overrides.tags) : [],
           status,
           archived: Boolean(overrides.archived),
@@ -1163,6 +1380,10 @@
           summaryError: String(overrides.summaryError || ''),
           summaryPrompt: String(overrides.summaryPrompt || ''),
           summarySignature: String(overrides.summarySignature || ''),
+          structuredData: normalizeStructuredData(overrides.structuredData),
+          structuredDataUpdatedAt: typeof overrides.structuredDataUpdatedAt === 'number' ? overrides.structuredDataUpdatedAt : null,
+          structuredDataStatus,
+          structuredDataError: String(overrides.structuredDataError || ''),
           lastFhirSentAt: typeof overrides.lastFhirSentAt === 'number' ? overrides.lastFhirSentAt : null,
           lastFhirSentStatus: String(overrides.lastFhirSentStatus || ''),
           lastFhirSentEndpoint: String(overrides.lastFhirSentEndpoint || ''),
@@ -1177,6 +1398,10 @@
         session.documents = (Array.isArray(rawSession && rawSession.documents) ? rawSession.documents : []).map((documentItem) => createSessionDocument(documentItem));
         session.tags = dedupeStrings(rawSession && rawSession.tags);
         session.ephemeral = Boolean(rawSession && rawSession.ephemeral);
+        session.structuredData = normalizeStructuredData(rawSession && rawSession.structuredData);
+        session.manualNotesUpdatedAt = typeof rawSession?.manualNotesUpdatedAt === 'number'
+          ? rawSession.manualNotesUpdatedAt
+          : (normaliseWhitespace(session.manualNotes) ? (session.updatedAt || session.createdAt) : null);
         if (session.status === 'listening') {
           session.status = 'paused';
           session.lastStartedSegmentAt = null;
@@ -1903,6 +2128,10 @@
         historySelectedSessionId: null,
         historyEditMode: false,
         historyDetailSearch: '',
+        reviewMode: {
+          consultationLowConfidenceOnly: false,
+          historyLowConfidenceOnly: false
+        },
         historySelectedAssetId: 'summary',
         selectedDocumentId: null,
         documentGenerationRequest: null,
@@ -1977,6 +2206,14 @@
         consultationSummary: $('consultationSummary'),
         consultationSummaryMeta: $('consultationSummaryMeta'),
         generateSummaryBtn: $('generateSummaryBtn'),
+        consultationStructuredCard: $('consultationStructuredCard'),
+        consultationStructuredMeta: $('consultationStructuredMeta'),
+        consultationStructuredContainer: $('consultationStructuredContainer'),
+        extractStructuredBtn: $('extractStructuredBtn'),
+        consultationReviewCard: $('consultationReviewCard'),
+        consultationReviewMeta: $('consultationReviewMeta'),
+        consultationReviewContainer: $('consultationReviewContainer'),
+        consultationReviewLowConfidenceToggle: $('consultationReviewLowConfidenceToggle'),
         documentGenerationCard: $('documentGenerationCard'),
         documentCardMeta: $('documentCardMeta'),
         consultationDocumentType: $('consultationDocumentType'),
@@ -2832,6 +3069,9 @@
         upsertSession(refreshedSession);
         persistSessions();
         renderSummaryViewsForSession(refreshedSession.id);
+        if (refreshedSession.structuredDataStatus === 'idle' && !hasStructuredDataContent(refreshedSession.structuredData)) {
+          void refreshSessionStructuredData(refreshedSession.id, { force: true, showFeedback: false });
+        }
         return refreshedSession;
       }
 
@@ -2944,6 +3184,347 @@
         updateSummaryButton(refs.generateSummaryBtn, session);
       }
 
+      function renderStructuredViewsForSession(sessionId) {
+        if (state.activeSession && state.activeSession.id === sessionId) renderConsultationStructuredView();
+        if (state.activeSession && state.activeSession.id === sessionId) renderConsultationReviewMode();
+        if (state.currentTab === 'history' && state.historySelectedSessionId === sessionId) renderHistoryDetail();
+      }
+
+      function getStructuredDataStatusText(session) {
+        if (!session) return 'Extract clinically useful buckets from notes, summary, and transcript.';
+        if (session.structuredDataStatus === 'generating') return 'Extracting structured items from manual notes, AI summary, and transcript.';
+        if (session.structuredDataStatus === 'error') return session.structuredDataError || 'Structured extraction failed.';
+        if (session.structuredDataStatus === 'ready') {
+          return hasStructuredDataContent(session.structuredData)
+            ? ('Updated ' + formatDateTime(session.structuredDataUpdatedAt || session.updatedAt) + ' from manual notes, AI summary, and transcript.')
+            : 'No structured items were confidently extracted. You can still add or edit them manually in History.';
+        }
+        return 'Run extraction to build conservative problem, medication, investigation, follow-up, and admin buckets from this session.';
+      }
+
+      function buildStructuredDataViewHtml(session, options = {}) {
+        const editable = Boolean(options.editable);
+        const data = normalizeStructuredData(session && session.structuredData);
+        const showEmptySections = options.showEmptySections !== false;
+        const sections = STRUCTURED_DATA_FIELDS
+          .map((field) => {
+            const items = data[field.key];
+            if (!editable && !showEmptySections && !items.length) return '';
+            return '<section class="structured-section">' +
+              '<div class="structured-section-head"><h4>' + escapeHtml(field.label) + '</h4></div>' +
+              (editable
+                ? '<textarea class="structured-editor" data-structured-field="' + escapeAttribute(field.key) + '" rows="4" placeholder="' + escapeAttribute(field.placeholder) + '">' + escapeHtml(items.join('\n')) + '</textarea><div class="subtle-note">One item per line. Remove lines to clear items.</div>'
+                : (items.length
+                  ? '<ul class="summary-list">' + items.map((item) => '<li>' + escapeHtml(item) + '</li>').join('') + '</ul>'
+                  : '<div class="structured-empty">Not stated</div>')) +
+              '</section>';
+          })
+          .filter(Boolean);
+        if (!sections.length) return '<div class="empty-state small">No structured items are available for this session yet.</div>';
+        return '<div class="structured-grid">' + sections.join('') + '</div>';
+      }
+
+      async function refreshSessionStructuredData(sessionId, options = {}) {
+        const session = findSession(sessionId);
+        if (!session) return null;
+        const force = Boolean(options.force);
+        const showFeedback = options.showFeedback !== false;
+        if (session.structuredDataStatus === 'generating') return session;
+        if (!force && session.structuredDataStatus === 'ready' && hasStructuredDataContent(session.structuredData)) return session;
+
+        session.structuredDataStatus = 'generating';
+        session.structuredDataError = '';
+        session.updatedAt = Date.now();
+        upsertSession(session);
+        persistSessionsDebounced();
+        renderStructuredViewsForSession(session.id);
+
+        try {
+          await Promise.resolve();
+          const extracted = extractStructuredDataFromSession(session);
+          const refreshedSession = findSession(session.id);
+          if (!refreshedSession) return null;
+          refreshedSession.structuredData = extracted;
+          refreshedSession.structuredDataUpdatedAt = Date.now();
+          refreshedSession.structuredDataStatus = 'ready';
+          refreshedSession.structuredDataError = '';
+          refreshedSession.updatedAt = Date.now();
+          upsertSession(refreshedSession);
+          persistSessionsDebounced();
+          renderStructuredViewsForSession(refreshedSession.id);
+          if (showFeedback) showToast(hasStructuredDataContent(extracted) ? 'Structured items extracted.' : 'No structured items were confidently extracted.', hasStructuredDataContent(extracted) ? 'success' : 'info', 2600);
+          return refreshedSession;
+        } catch (error) {
+          const refreshedSession = findSession(session.id);
+          if (!refreshedSession) return null;
+          refreshedSession.structuredDataStatus = 'error';
+          refreshedSession.structuredDataError = 'Structured extraction failed: ' + normaliseWhitespace(error && error.message ? error.message : String(error || 'Unknown error'));
+          refreshedSession.updatedAt = Date.now();
+          upsertSession(refreshedSession);
+          persistSessionsDebounced();
+          renderStructuredViewsForSession(refreshedSession.id);
+          if (showFeedback) showToast('Structured extraction failed.', 'error', 3600);
+          return refreshedSession;
+        }
+      }
+
+      function renderConsultationStructuredView() {
+        if (isSessionUiLocked()) {
+          refs.consultationStructuredCard.classList.remove('hidden');
+          refs.consultationStructuredMeta.textContent = 'Unlock the app to review extracted structured items.';
+          refs.extractStructuredBtn.disabled = true;
+          refs.extractStructuredBtn.textContent = 'Extract structured items';
+          refs.consultationStructuredContainer.innerHTML = renderLockedPlaceholder(getSessionLockPlaceholderText('structured session items'));
+          return;
+        }
+        const session = state.activeSession;
+        refs.consultationStructuredCard.classList.toggle('hidden', !session);
+        if (!session) return;
+        refs.extractStructuredBtn.disabled = session.structuredDataStatus === 'generating';
+        refs.extractStructuredBtn.textContent = session.structuredDataStatus === 'generating' ? 'Extracting...' : 'Extract structured items';
+        refs.consultationStructuredMeta.textContent = getStructuredDataStatusText(session);
+        refs.consultationStructuredContainer.innerHTML = buildStructuredDataViewHtml(session, { editable: false, showEmptySections: true });
+      }
+
+      function getTranscriptEntryConfidenceBand(entry) {
+        if (!entry || entry.isImportantMarker || typeof entry.confidence !== 'number') return 'unknown';
+        if (entry.confidence >= 0.85) return 'high';
+        if (entry.confidence >= 0.65) return 'medium';
+        return 'low';
+      }
+
+      function getTranscriptEntryConfidenceLabel(entry) {
+        const band = getTranscriptEntryConfidenceBand(entry);
+        if (band === 'high') return 'High confidence';
+        if (band === 'medium') return 'Medium confidence';
+        if (band === 'low') return 'Low confidence';
+        return 'Confidence unavailable';
+      }
+
+      function isLowConfidenceTranscriptEntry(entry) {
+        return getTranscriptEntryConfidenceBand(entry) === 'low';
+      }
+
+      function getLowConfidenceTranscriptEntries(session) {
+        return (Array.isArray(session && session.transcriptEntries) ? session.transcriptEntries : []).filter((entry) => !entry.isImportantMarker && isLowConfidenceTranscriptEntry(entry));
+      }
+
+      function hasLowConfidenceTranscriptEntries(session) {
+        return getLowConfidenceTranscriptEntries(session).length > 0;
+      }
+
+      function getTranscriptLastUpdatedAt(session) {
+        return (Array.isArray(session && session.transcriptEntries) ? session.transcriptEntries : []).reduce((latest, entry) => Math.max(latest, entry.lastUpdatedAt || entry.timestamp || 0), 0);
+      }
+
+      function getReviewSourceUpdatedAt(session) {
+        return Math.max(getTranscriptLastUpdatedAt(session), Number(session && session.manualNotesUpdatedAt) || 0);
+      }
+
+      function isDocumentReviewStale(session, documentItem) {
+        if (!session || !documentItem) return false;
+        return getReviewSourceUpdatedAt(session) > Number(documentItem.updatedAt || 0);
+      }
+
+      function hasStaleReviewDocuments(session) {
+        return (Array.isArray(session && session.documents) ? session.documents : []).some((documentItem) => isDocumentReviewStale(session, documentItem));
+      }
+
+      function hasSummaryNeedsReview(session) {
+        return Boolean(session && normaliseWhitespace(session.summary) && hasLowConfidenceTranscriptEntries(session));
+      }
+
+      function hasStructuredDataStaleBadge(session) {
+        return Boolean(session && hasStructuredDataContent(session.structuredData) && isSessionSummaryStale(session));
+      }
+
+      function getStructuredFieldExtractor(fieldKey) {
+        const extractorMap = {
+          problems: extractProblemsFromText,
+          medications: extractMedicationsFromText,
+          allergies: extractAllergiesFromText,
+          investigations: extractInvestigationsFromText,
+          followUpActions: extractFollowUpActionsFromText,
+          diagnoses: extractDiagnosesFromText,
+          safetyNetting: extractSafetyNettingFromText,
+          adminTasks: extractAdminTasksFromText
+        };
+        return extractorMap[fieldKey] || (() => []);
+      }
+
+      function itemMatchesSource(item, sourceText, extractor) {
+        const normalizedItem = normaliseWhitespace(String(item || '')).toLowerCase();
+        if (!normalizedItem || !normaliseWhitespace(sourceText)) return false;
+        const extractedItems = normalizeStructuredDataItems(extractor(sourceText)).map((value) => value.toLowerCase());
+        if (extractedItems.includes(normalizedItem)) return true;
+        return normaliseWhitespace(sourceText).toLowerCase().includes(normalizedItem);
+      }
+
+      function getStructuredItemSourceLabels(session, fieldKey, item) {
+        const extractor = getStructuredFieldExtractor(fieldKey);
+        const labels = [];
+        if (itemMatchesSource(item, session && session.manualNotes, extractor)) labels.push('User-entered note');
+        if (itemMatchesSource(item, session && session.summary, extractor)) labels.push('AI-generated summary');
+        if (itemMatchesSource(item, getTranscriptSummarySource(session), extractor)) labels.push('Transcript-derived');
+        return labels.length ? labels : ['Structured extraction'];
+      }
+
+      function buildReviewBadge(text, tone = 'neutral') {
+        return '<span class="review-badge ' + escapeAttribute(tone) + '">' + escapeHtml(text) + '</span>';
+      }
+
+      function buildReviewProvenanceLabels(labels) {
+        return (Array.isArray(labels) ? labels : []).map((label) => buildReviewBadge(label, 'provenance')).join('');
+      }
+
+      function focusTranscriptEntryInContainer(container, entryId) {
+        if (!container || !entryId) return;
+        const entry = Array.from(container.querySelectorAll('[data-transcript-entry-id]')).find((item) => item.dataset.transcriptEntryId === entryId);
+        if (!entry) return;
+        entry.classList.add('review-focus');
+        entry.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        const textNode = entry.querySelector('.transcript-text');
+        if (textNode && textNode.getAttribute('contenteditable') === 'true') textNode.focus();
+        window.setTimeout(() => { entry.classList.remove('review-focus'); }, 2200);
+      }
+
+      function focusTranscriptEntry(session, entryId, context = 'consultation') {
+        if (!session || !entryId) return;
+        if (context === 'history') {
+          state.historyDetailSearch = '';
+          renderHistoryDetail();
+          window.requestAnimationFrame(() => {
+            focusTranscriptEntryInContainer(refs.historyDetail.querySelector('#historyTranscriptContainer'), entryId);
+          });
+          return;
+        }
+        state.transcriptSearch = '';
+        refs.transcriptSearch.value = '';
+        renderConsultationTranscript();
+        renderSessionHint();
+        window.requestAnimationFrame(() => {
+          focusTranscriptEntryInContainer(refs.transcriptContainer, entryId);
+        });
+      }
+
+      function applyReviewTranscriptSearch(session, query, context = 'consultation') {
+        if (!session) return;
+        const searchText = normaliseWhitespace(query);
+        if (!searchText) return;
+        if (context === 'history') {
+          state.historyDetailSearch = searchText;
+          renderHistoryDetail();
+          window.requestAnimationFrame(() => {
+            const firstMatch = refs.historyDetail.querySelector('[data-transcript-entry-id]');
+            if (firstMatch) focusTranscriptEntryInContainer(refs.historyDetail.querySelector('#historyTranscriptContainer'), firstMatch.dataset.transcriptEntryId);
+          });
+          return;
+        }
+        state.transcriptSearch = searchText;
+        refs.transcriptSearch.value = searchText;
+        renderConsultationTranscript();
+        renderSessionHint();
+        window.requestAnimationFrame(() => {
+          const firstMatch = refs.transcriptContainer.querySelector('[data-transcript-entry-id]');
+          if (firstMatch) focusTranscriptEntryInContainer(refs.transcriptContainer, firstMatch.dataset.transcriptEntryId);
+        });
+      }
+
+      function getReviewTranscriptEntries(session, onlyLowConfidence) {
+        const entries = Array.isArray(session && session.transcriptEntries) ? session.transcriptEntries.filter((entry) => !entry.isImportantMarker) : [];
+        if (onlyLowConfidence) return entries.filter((entry) => isLowConfidenceTranscriptEntry(entry));
+        return entries.slice(-8);
+      }
+
+      function getReviewModeMetaText(session) {
+        if (!session) return 'Review transcript confidence, generated content, and stale outputs before finalising the note.';
+        const lowConfidenceCount = getLowConfidenceTranscriptEntries(session).length;
+        const staleParts = [];
+        if (isSessionSummaryStale(session)) staleParts.push('summary stale');
+        if (hasStructuredDataStaleBadge(session)) staleParts.push('structured data stale');
+        if (hasStaleReviewDocuments(session)) staleParts.push('document stale');
+        const notes = [];
+        if (lowConfidenceCount) notes.push(String(lowConfidenceCount) + ' low-confidence transcript block' + (lowConfidenceCount === 1 ? '' : 's'));
+        if (staleParts.length) notes.push(staleParts.join(', '));
+        return notes.length ? notes.join(' • ') : 'No review warnings are currently flagged for this stopped session.';
+      }
+
+      function buildReviewTranscriptSectionHtml(session, context) {
+        const onlyLowConfidence = context === 'history' ? state.reviewMode.historyLowConfidenceOnly : state.reviewMode.consultationLowConfidenceOnly;
+        const entries = getReviewTranscriptEntries(session, onlyLowConfidence);
+        const lowConfidenceCount = getLowConfidenceTranscriptEntries(session).length;
+        return '<section class="review-section">' +
+          '<div class="review-section-header"><div><h4>Transcript</h4><div class="review-badges">' + buildReviewProvenanceLabels(['Transcript-derived']) + (lowConfidenceCount ? buildReviewBadge(String(lowConfidenceCount) + ' low-confidence', 'warning') : '') + '</div></div></div>' +
+          (entries.length
+            ? '<div class="review-entry-list">' + entries.map((entry) => '<button type="button" class="review-entry-button ' + escapeAttribute(getTranscriptEntryConfidenceBand(entry)) + '" data-review-entry-id="' + escapeAttribute(entry.id) + '" data-review-context="' + escapeAttribute(context) + '"><div class="review-entry-head"><span>' + escapeHtml(formatClock(entry.timestamp)) + '</span><span class="review-entry-confidence ' + escapeAttribute(getTranscriptEntryConfidenceBand(entry)) + '">' + escapeHtml(getTranscriptEntryConfidenceLabel(entry)) + '</span></div><div class="review-entry-text">' + escapeHtml(String(entry.text || '').slice(0, 220) || 'Transcript segment') + '</div></button>').join('') + '</div>'
+            : '<div class="empty-state small">' + escapeHtml(onlyLowConfidence ? 'No low-confidence transcript blocks were found for this session.' : 'No transcript entries are available for review.') + '</div>') +
+          '</section>';
+      }
+
+      function buildReviewSummarySectionHtml(session) {
+        const badges = [buildReviewBadge('AI-generated summary', 'provenance')];
+        if (hasSummaryNeedsReview(session)) badges.push(buildReviewBadge('Needs review', 'warning'));
+        if (isSessionSummaryStale(session)) badges.push(buildReviewBadge('Stale', 'stale'));
+        return '<section class="review-section">' +
+          '<div class="review-section-header"><div><h4>AI Summary</h4><div class="review-badges">' + badges.join('') + '</div></div><div class="inline-actions"><button class="btn small" type="button" data-review-action="regenerate-summary">' + escapeHtml(normaliseWhitespace(session && session.summary) ? 'Regenerate Summary' : 'Generate Summary') + '</button></div></div>' +
+          '<div class="review-section-body">' + buildSummaryPanelHtml(session) + '</div>' +
+          '</section>';
+      }
+
+      function buildReviewStructuredSectionHtml(session, context) {
+        const data = normalizeStructuredData(session && session.structuredData);
+        const badges = [buildReviewBadge('Structured extraction', 'provenance')];
+        if (hasStructuredDataStaleBadge(session)) badges.push(buildReviewBadge('Stale', 'stale'));
+        const groups = STRUCTURED_DATA_FIELDS
+          .filter((field) => data[field.key].length)
+          .map((field) => '<div class="review-structured-group"><h5>' + escapeHtml(field.label) + '</h5><div class="review-structured-items">' + data[field.key].map((item) => '<button type="button" class="review-structured-item" data-review-query="' + escapeAttribute(item) + '" data-review-context="' + escapeAttribute(context) + '"><span class="review-structured-item-text">' + escapeHtml(item) + '</span><span class="review-badges">' + buildReviewProvenanceLabels(getStructuredItemSourceLabels(session, field.key, item)) + '</span></button>').join('') + '</div></div>').join('');
+        return '<section class="review-section">' +
+          '<div class="review-section-header"><div><h4>Structured Items</h4><div class="review-badges">' + badges.join('') + '</div></div><div class="inline-actions"><button class="btn small" type="button" data-review-action="extract-structured">Extract structured items</button></div></div>' +
+          (groups ? '<div class="review-section-body">' + groups + '</div>' : '<div class="empty-state small">No structured items are available for review yet.</div>') +
+          '</section>';
+      }
+
+      function buildReviewDocumentsSectionHtml(session) {
+        const documents = Array.isArray(session && session.documents) ? session.documents.slice().sort((left, right) => (right.updatedAt || 0) - (left.updatedAt || 0)) : [];
+        const badges = [buildReviewBadge('AI-generated document', 'provenance')];
+        if (hasStaleReviewDocuments(session)) badges.push(buildReviewBadge('Stale output', 'stale'));
+        return '<section class="review-section">' +
+          '<div class="review-section-header"><div><h4>Generated Documents</h4><div class="review-badges">' + badges.join('') + '</div></div></div>' +
+          (documents.length
+            ? '<div class="review-document-list">' + documents.map((documentItem) => '<div class="review-document-card"><div class="review-document-head"><strong>' + escapeHtml(documentItem.title || documentItem.templateName || 'Document') + '</strong><div class="review-badges">' + (isDocumentReviewStale(session, documentItem) ? buildReviewBadge('Stale', 'stale') : '') + '</div></div><p>' + escapeHtml(getDocumentPreviewText(documentItem).slice(0, 220) || 'Generated document preview') + '</p><div class="inline-actions"><button class="btn small" type="button" data-review-action="open-document" data-review-document-id="' + escapeAttribute(documentItem.id) + '">Open document</button>' + (documentItem.templateId ? '<button class="btn small" type="button" data-review-action="regenerate-document" data-review-template-id="' + escapeAttribute(documentItem.templateId) + '">Regenerate</button>' : '') + '</div></div>').join('') + '</div>'
+            : '<div class="empty-state small">No generated documents are available for review yet.</div>') +
+          '</section>';
+      }
+
+      function buildReviewModePanelHtml(session, context = 'consultation') {
+        if (!session) return '<div class="empty-state small">Stop or open a session to review its transcript, summary, structured items, and generated documents.</div>';
+        return '<div class="review-grid">' +
+          buildReviewTranscriptSectionHtml(session, context) +
+          buildReviewSummarySectionHtml(session) +
+          buildReviewStructuredSectionHtml(session, context) +
+          buildReviewDocumentsSectionHtml(session) +
+          '</div>';
+      }
+
+      function renderConsultationReviewMode() {
+        if (isSessionUiLocked()) {
+          refs.consultationReviewCard.classList.remove('hidden');
+          refs.consultationReviewMeta.textContent = 'Unlock the app to review generated and extracted outputs.';
+          refs.consultationReviewLowConfidenceToggle.disabled = true;
+          refs.consultationReviewLowConfidenceToggle.textContent = 'Show low-confidence only';
+          refs.consultationReviewContainer.innerHTML = renderLockedPlaceholder(getSessionLockPlaceholderText('review mode'));
+          return;
+        }
+        const session = state.activeSession;
+        const canShow = Boolean(session && session.status === 'stopped');
+        refs.consultationReviewCard.classList.toggle('hidden', !canShow);
+        if (!canShow) return;
+        refs.consultationReviewMeta.textContent = getReviewModeMetaText(session);
+        refs.consultationReviewLowConfidenceToggle.disabled = false;
+        refs.consultationReviewLowConfidenceToggle.textContent = state.reviewMode.consultationLowConfidenceOnly ? 'Show all transcript blocks' : 'Show low-confidence only';
+        refs.consultationReviewContainer.innerHTML = buildReviewModePanelHtml(session, 'consultation');
+      }
+
       function getDocumentTemplates() {
         return Array.isArray(state.customisation.documentTemplates) ? state.customisation.documentTemplates : [];
       }
@@ -3036,6 +3617,12 @@
       }
 
       function getDocumentTemplatePrompt(template, session, transcriptSource) {
+        const structuredData = getEffectiveStructuredData(session);
+        const structuredContext = STRUCTURED_DATA_FIELDS
+          .map((field) => ({ label: field.label, items: structuredData[field.key] }))
+          .filter((field) => Array.isArray(field.items) && field.items.length)
+          .map((field) => field.label + ':\n- ' + field.items.join('\n- '))
+          .join('\n\n');
         return [
           'Generate a rich text HTML fragment for the following medical document type.',
           'Return semantic HTML only. Do not return markdown. Do not use code fences. Do not include <html>, <head>, <body>, <script>, or <style> tags.',
@@ -3046,6 +3633,7 @@
           'Patient: ' + (session.patientName || ''),
           'Clinician: ' + (session.clinicianName || ''),
           'Consultation Type: ' + (session.consultationType || ''),
+          structuredContext ? ('\nStructured extraction:\n' + structuredContext) : '',
           '',
           'Consultation transcript:',
           transcriptSource
@@ -3069,6 +3657,7 @@
 
       function refreshDocumentGenerationUi() {
         renderConsultationDocuments();
+        renderConsultationReviewMode();
         renderDocumentsTab();
         if (state.currentTab === 'history' && state.historySelectedSessionId) renderHistoryDetail();
       }
@@ -3376,10 +3965,12 @@
       function syncActiveSessionFromForm() {
         if (!state.activeSession) return;
         const values = readConsultationForm();
+        const manualNotesChanged = state.activeSession.manualNotes !== values.manualNotes;
         state.activeSession.patientName = values.patientName;
         state.activeSession.clinicianName = values.clinicianName;
         state.activeSession.consultationType = values.consultationType;
         state.activeSession.manualNotes = values.manualNotes;
+        if (manualNotesChanged) state.activeSession.manualNotesUpdatedAt = Date.now();
         state.activeSession.tags = dedupeStrings(values.tags);
         state.activeSession.updatedAt = Date.now();
         upsertSession(state.activeSession);
@@ -3396,7 +3987,7 @@
       function createSessionFromConsultation(status = 'stopped') {
         const now = Date.now();
         const formValues = readConsultationForm();
-        const session = createSession({ patientName: formValues.patientName, clinicianName: formValues.clinicianName, consultationType: formValues.consultationType, manualNotes: formValues.manualNotes, tags: formValues.tags.slice(), status, startedAt: now, createdAt: now, updatedAt: now, elapsedMs: 0, lastStartedSegmentAt: null, stoppedAt: status === 'stopped' ? now : null, ephemeral: Boolean(state.settings.ephemeralConsultationMode) });
+        const session = createSession({ patientName: formValues.patientName, clinicianName: formValues.clinicianName, consultationType: formValues.consultationType, manualNotes: formValues.manualNotes, manualNotesUpdatedAt: normaliseWhitespace(formValues.manualNotes) ? now : null, tags: formValues.tags.slice(), status, startedAt: now, createdAt: now, updatedAt: now, elapsedMs: 0, lastStartedSegmentAt: null, stoppedAt: status === 'stopped' ? now : null, ephemeral: Boolean(state.settings.ephemeralConsultationMode) });
         state.activeSession = session;
         state.selectedDocumentId = null;
         state.consultationDraftTags = formValues.tags.slice();
@@ -3601,6 +4192,7 @@
         if (state.activeSession && state.activeSession.id === session.id) {
           renderConsultationChrome();
           renderConsultationSummary();
+          renderConsultationReviewMode();
         }
         if (state.currentTab === 'history' && state.historySelectedSessionId === session.id) renderHistoryDetail();
       }
@@ -3608,9 +4200,10 @@
       function renderTranscriptEntries(container, session, options = {}) {
         const searchTerm = String(options.searchTerm || '').trim();
         const editable = Boolean(options.editable);
+        const onlyLowConfidence = Boolean(options.onlyLowConfidence);
         const emptyMessage = options.emptyMessage || 'No transcript recorded yet.';
         const onEntryChange = typeof options.onEntryChange === 'function' ? options.onEntryChange : null;
-        const entries = getTranscriptDisplayEntries(session, searchTerm);
+        const entries = getTranscriptDisplayEntries(session, searchTerm).filter((entry) => !onlyLowConfidence || entry.isImportantMarker || isLowConfidenceTranscriptEntry(entry));
         container.innerHTML = '';
         if (!entries.length) {
           container.innerHTML = '<div class="empty-state small">' + escapeHtml(searchTerm ? 'No matching transcript segments.' : emptyMessage) + '</div>';
@@ -3618,12 +4211,13 @@
         }
         entries.forEach((entry) => {
           const article = document.createElement('article');
-          article.className = 'transcript-entry' + (entry.isImportantMarker ? ' marker' : '');
+          article.className = 'transcript-entry' + (entry.isImportantMarker ? ' marker' : '') + (entry.isImportantMarker ? '' : ' ' + getTranscriptEntryConfidenceBand(entry) + '-confidence');
+          article.dataset.transcriptEntryId = entry.id;
           const header = document.createElement('div');
           header.className = 'transcript-entry-head';
           const meta = document.createElement('div');
           meta.className = 'entry-meta';
-          meta.innerHTML = '<span class="timestamp-badge">' + escapeHtml(formatClock(entry.timestamp)) + '</span>' + '<span class="offset-badge">+' + escapeHtml(formatDuration(Math.max(0, (entry.timestamp || 0) - (session.startedAt || entry.timestamp || 0)))) + '</span>' + (entry.isImportantMarker ? '<span class="meta-badge">Important moment</span>' : (entry.confidence != null ? '<span class="confidence-pill">' + Math.round(entry.confidence * 100) + '% confidence</span>' : ''));
+          meta.innerHTML = '<span class="timestamp-badge">' + escapeHtml(formatClock(entry.timestamp)) + '</span>' + '<span class="offset-badge">+' + escapeHtml(formatDuration(Math.max(0, (entry.timestamp || 0) - (session.startedAt || entry.timestamp || 0)))) + '</span>' + (entry.isImportantMarker ? '<span class="meta-badge">Important moment</span>' : (entry.confidence != null ? '<span class="confidence-pill ' + escapeAttribute(getTranscriptEntryConfidenceBand(entry)) + '">' + Math.round(entry.confidence * 100) + '% confidence</span><span class="review-badge provenance">' + escapeHtml(getTranscriptEntryConfidenceLabel(entry)) + '</span>' : ''));
           header.appendChild(meta);
           const body = document.createElement('div');
           body.className = 'transcript-text';
@@ -3686,6 +4280,8 @@
           renderConsultationPrivacyMessage();
           renderConsultationChrome();
           renderConsultationSummary();
+          renderConsultationStructuredView();
+          renderConsultationReviewMode();
           renderConsultationDocuments();
           renderConsultationTranscript();
           renderDocumentsTab();
@@ -3703,6 +4299,8 @@
         renderConsultationTagSelector();
         renderConsultationChrome();
         renderConsultationSummary();
+        renderConsultationStructuredView();
+        renderConsultationReviewMode();
         renderConsultationDocuments();
         renderConsultationTranscript();
         renderDocumentsTab();
@@ -3781,6 +4379,7 @@
         if (notesEditor) {
           notesEditor.addEventListener('input', () => {
             session.manualNotes = notesEditor.value;
+            session.manualNotesUpdatedAt = Date.now();
             session.updatedAt = Date.now();
             upsertSession(session);
             syncConsultationViewForSession(session);
@@ -3800,6 +4399,71 @@
             await generateSessionSummary(session.id, { force: true });
           });
         }
+        const historyReviewToggle = detailRoot.querySelector('#historyReviewLowConfidenceToggle');
+        if (historyReviewToggle) {
+          historyReviewToggle.addEventListener('click', () => {
+            state.reviewMode.historyLowConfidenceOnly = !state.reviewMode.historyLowConfidenceOnly;
+            renderHistoryDetail();
+          });
+        }
+        const structuredButton = detailRoot.querySelector('#historyExtractStructuredBtn');
+        if (structuredButton) {
+          structuredButton.addEventListener('click', async () => {
+            await refreshSessionStructuredData(session.id, { force: true });
+          });
+        }
+        detailRoot.querySelectorAll('[data-structured-field]').forEach((input) => {
+          input.addEventListener('input', () => {
+            session.structuredData = normalizeStructuredData(Object.assign({}, session.structuredData, {
+              [input.dataset.structuredField]: splitStructuredEditorValue(input.value)
+            }));
+            session.structuredDataUpdatedAt = Date.now();
+            session.structuredDataStatus = 'ready';
+            session.structuredDataError = '';
+            session.updatedAt = Date.now();
+            upsertSession(session);
+            if (state.activeSession && state.activeSession.id === session.id) renderConsultationStructuredView();
+            if (state.activeSession && state.activeSession.id === session.id) renderConsultationReviewMode();
+            if (state.currentTab === 'history') renderHistoryList();
+            persistSessionsDebounced();
+          });
+        });
+        detailRoot.querySelectorAll('[data-review-entry-id]').forEach((button) => {
+          button.addEventListener('click', () => {
+            focusTranscriptEntry(session, button.dataset.reviewEntryId, button.dataset.reviewContext || 'history');
+          });
+        });
+        detailRoot.querySelectorAll('[data-review-query]').forEach((button) => {
+          button.addEventListener('click', () => {
+            applyReviewTranscriptSearch(session, button.dataset.reviewQuery, button.dataset.reviewContext || 'history');
+          });
+        });
+        detailRoot.querySelectorAll('[data-review-action]').forEach((button) => {
+          button.addEventListener('click', async () => {
+            const action = button.dataset.reviewAction;
+            if (action === 'regenerate-summary') {
+              await generateSessionSummary(session.id, { force: true });
+              return;
+            }
+            if (action === 'extract-structured') {
+              await refreshSessionStructuredData(session.id, { force: true });
+              return;
+            }
+            if (action === 'open-document') {
+              const documentId = button.dataset.reviewDocumentId || null;
+              setSelectedDocument(documentId);
+              setSelectedHistoryAsset(documentId || 'summary');
+              renderHistoryDetail();
+              renderDocumentsTab();
+              return;
+            }
+            if (action === 'regenerate-document') {
+              const templateId = button.dataset.reviewTemplateId || '';
+              if (!templateId) return;
+              await generateSessionDocument(session.id, templateId, { openTab: false });
+            }
+          });
+        });
         const historyAssetSelect = detailRoot.querySelector('#historySessionAssetSelect');
         if (historyAssetSelect) {
           historyAssetSelect.addEventListener('change', () => {
@@ -3871,10 +4535,18 @@
           '<div class="field"><span class="label">Consultation Type</span>' + (editable ? '<input data-history-field="consultationType" value="' + escapeAttribute(session.consultationType || '') + '" />' : '<div class="static-value">' + escapeHtml(session.consultationType || '-') + '</div>') + '</div>' +
           '</div>' +
           '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Metadata</h4><div class="subtle-note">Started ' + escapeHtml(formatDateTime(session.startedAt || session.createdAt)) + ' • Duration ' + escapeHtml(formatDuration(getSessionElapsedMs(session))) + ' • Updated ' + escapeHtml(formatDateTime(session.updatedAt)) + '</div></div><div class="inline-actions"><span class="status-pill ' + escapeAttribute(session.status) + '">' + escapeHtml(titleCaseStatus(session.status)) + '</span>' + (session.archived ? '<span class="archived-badge">Archived</span>' : '') + '</div></div><div class="tag-selector" id="historyTagList"></div></div>' +
+          '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Review mode</h4><div class="subtle-note" id="historyReviewMeta"></div></div><div class="inline-actions"><button class="btn small" type="button" id="historyReviewLowConfidenceToggle">' + escapeHtml(state.reviewMode.historyLowConfidenceOnly ? 'Show all transcript blocks' : 'Show low-confidence only') + '</button></div></div><div class="review-mode-container" id="historyReviewContainer"></div></div>' +
           '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Manual notes</h4><div class="subtle-note">Editable when history detail is in edit mode.</div></div></div>' + (editable ? '<textarea id="historyNotesEditor" class="manual-notes" style="min-height:140px;">' + escapeHtml(session.manualNotes || '') + '</textarea>' : '<div class="note-preview">' + escapeHtml(session.manualNotes || 'No manual notes.').replace(/\n/g, '<br>') + '</div>') + '</div>' +
+          '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Structured view</h4><div class="subtle-note" id="historyStructuredMeta"></div></div><div class="inline-actions"><button class="btn small" type="button" id="historyExtractStructuredBtn">' + escapeHtml(session.structuredDataStatus === 'generating' ? 'Extracting...' : 'Extract structured items') + '</button></div></div><div class="structured-output" id="historyStructuredContainer"></div></div>' +
           '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Session documents</h4><div class="subtle-note" id="historyDocumentMeta"></div></div><div class="inline-actions"><div class="field" style="margin:0; min-width:220px;"><label class="label" for="historySessionAssetSelect">Show document</label><select id="historySessionAssetSelect"></select></div>' + (canShowDocuments ? '<div class="field" style="margin:0; min-width:220px;"><label class="label" for="historyDocumentTemplateSelect">Generate type</label><select id="historyDocumentTemplateSelect"></select></div><button class="btn small secondary" type="button" id="historyGenerateDocumentBtn">Generate Document</button>' : '') + '<button class="btn small" type="button" id="historyGenerateSummaryBtn">Generate Summary</button></div></div><div class="summary-output" id="historyDocumentContainer"></div></div>' +
           '<div class="detail-block"><div class="detail-header-row"><div><h4 style="margin:0;">Transcript</h4><div class="subtle-note">' + (editable && !state.historyDetailSearch ? 'Stopped transcripts can be corrected inline.' : 'Search to filter transcript segments.') + '</div></div><input id="historyDetailSearch" class="search-input" type="search" placeholder="Search within this transcript..." value="' + escapeAttribute(state.historyDetailSearch || '') + '" /></div><div class="transcript-container history-transcript" id="historyTranscriptContainer"></div></div>';
         renderHistoryTags(detail.querySelector('#historyTagList'), session, editable);
+        detail.querySelector('#historyReviewMeta').textContent = getReviewModeMetaText(session);
+        detail.querySelector('#historyReviewContainer').innerHTML = buildReviewModePanelHtml(session, 'history');
+        detail.querySelector('#historyStructuredMeta').textContent = getStructuredDataStatusText(session);
+        detail.querySelector('#historyStructuredContainer').innerHTML = buildStructuredDataViewHtml(session, { editable, showEmptySections: true });
+        const historyExtractStructuredBtn = detail.querySelector('#historyExtractStructuredBtn');
+        if (historyExtractStructuredBtn) historyExtractStructuredBtn.disabled = session.structuredDataStatus === 'generating';
         const historyAssetOptions = getHistorySessionAssets(session);
         const historyAssetSelect = detail.querySelector('#historySessionAssetSelect');
         historyAssetSelect.innerHTML = historyAssetOptions.map((asset) => '<option value="' + escapeAttribute(asset.id) + '">' + escapeHtml(asset.label) + '</option>').join('');
@@ -4118,6 +4790,7 @@
         renderSettingsForm();
         renderConsultationChrome();
         renderConsultationSummary();
+        renderConsultationReviewMode();
         renderConsultationDocuments();
         renderConsultationTranscript();
         renderDocumentsTab();
@@ -4411,6 +5084,7 @@
           if (state.activeSession) {
             syncActiveSessionFromForm();
             renderConsultationChrome();
+            renderConsultationReviewMode();
             if (state.currentTab === 'history' && state.historySelectedSessionId === state.activeSession.id) renderHistoryDetail();
             persistSessionsDebounced();
           }
@@ -4426,6 +5100,48 @@
         refs.generateSummaryBtn.addEventListener('click', async () => {
           if (!state.activeSession) return;
           await generateSessionSummary(state.activeSession.id, { force: true });
+        });
+        refs.extractStructuredBtn.addEventListener('click', async () => {
+          if (!state.activeSession) return;
+          await refreshSessionStructuredData(state.activeSession.id, { force: true });
+        });
+        refs.consultationReviewLowConfidenceToggle.addEventListener('click', () => {
+          state.reviewMode.consultationLowConfidenceOnly = !state.reviewMode.consultationLowConfidenceOnly;
+          renderConsultationReviewMode();
+        });
+        refs.consultationReviewContainer.addEventListener('click', async (event) => {
+          const reviewAction = event.target.closest('[data-review-action]');
+          if (reviewAction && state.activeSession) {
+            const action = reviewAction.dataset.reviewAction;
+            if (action === 'regenerate-summary') {
+              await generateSessionSummary(state.activeSession.id, { force: true });
+              return;
+            }
+            if (action === 'extract-structured') {
+              await refreshSessionStructuredData(state.activeSession.id, { force: true });
+              return;
+            }
+            if (action === 'open-document') {
+              setSelectedDocument(reviewAction.dataset.reviewDocumentId || null);
+              switchTab('documents');
+              return;
+            }
+            if (action === 'regenerate-document') {
+              const templateId = reviewAction.dataset.reviewTemplateId || '';
+              if (!templateId) return;
+              await generateSessionDocument(state.activeSession.id, templateId, { openTab: false });
+              return;
+            }
+          }
+          const reviewEntry = event.target.closest('[data-review-entry-id]');
+          if (reviewEntry && state.activeSession) {
+            focusTranscriptEntry(state.activeSession, reviewEntry.dataset.reviewEntryId, reviewEntry.dataset.reviewContext || 'consultation');
+            return;
+          }
+          const reviewQuery = event.target.closest('[data-review-query]');
+          if (reviewQuery && state.activeSession) {
+            applyReviewTranscriptSearch(state.activeSession, reviewQuery.dataset.reviewQuery, reviewQuery.dataset.reviewContext || 'consultation');
+          }
         });
         refs.generateDocumentBtn.addEventListener('click', async () => {
           if (isDocumentGenerationBusy()) {
@@ -4470,7 +5186,9 @@
           upsertSession(session);
           persistSessionsDebounced();
           renderConsultationDocuments();
+          renderConsultationReviewMode();
           renderDocumentsTab();
+          if (state.currentTab === 'history' && state.historySelectedSessionId === session.id) renderHistoryDetail();
         });
         refs.copyDocumentTextBtn.addEventListener('click', () => {
           const documentItem = getSelectedSessionDocument(getDocumentTargetSession());

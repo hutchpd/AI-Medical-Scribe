@@ -229,6 +229,32 @@
           </div>
         </div>
 
+        <div class="card summary-card hidden" id="consultationStructuredCard" style="margin-bottom: 18px;">
+          <div class="card-header">
+            <div>
+              <h3>Structured View</h3>
+              <div class="subtle-note" id="consultationStructuredMeta">Extract clinically useful buckets from the transcript, manual notes, and summary.</div>
+            </div>
+            <div class="inline-actions">
+              <button class="btn small" id="extractStructuredBtn" type="button">Extract structured items</button>
+            </div>
+          </div>
+          <div class="summary-output structured-output" id="consultationStructuredContainer"></div>
+        </div>
+
+        <div class="card summary-card hidden" id="consultationReviewCard" style="margin-bottom: 18px;">
+          <div class="card-header">
+            <div>
+              <h3>Review Mode</h3>
+              <div class="subtle-note" id="consultationReviewMeta">Review transcript confidence, generated content, and stale outputs before finalising the note.</div>
+            </div>
+            <div class="inline-actions">
+              <button class="btn small" id="consultationReviewLowConfidenceToggle" type="button">Show low-confidence only</button>
+            </div>
+          </div>
+          <div class="review-mode-container" id="consultationReviewContainer"></div>
+        </div>
+
         <div class="consultation-grid">
           <div class="card">
             <div class="card-header">

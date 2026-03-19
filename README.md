@@ -2,7 +2,7 @@
 
 ![Demo](demo.gif)
 
-AI Medical Scribe is a browser-based prototype for live consultation transcription, on-device summarisation, document drafting, structured client-side FHIR export, and optional direct browser-based FHIR delivery to a configured endpoint.
+AI Medical Scribe is a browser-based prototype for live consultation transcription, on-device summarisation, document drafting, structured extraction, review-mode highlighting, structured client-side FHIR export, and optional direct browser-based FHIR delivery to a configured endpoint.
 
 It is designed as a local-first front end. Session capture, notes, summaries, generated documents, FHIR exports, settings, and customisation are all handled in the browser with no project backend.
 
@@ -22,6 +22,8 @@ This project explores a different approach:
 - Important-moment markers inside the transcript timeline.
 - On-device AI summary generation after transcription stops.
 - Rich text document drafting from transcript content using configurable templates.
+- Structured extraction that turns transcript, manual notes, and summaries into clinically useful buckets (for example: problems, medications, allergies, investigations, follow-up actions, diagnoses, safety netting, and admin tasks).
+- Review mode with confidence highlighting, provenance cues, stale/needs-review badges, and quick actions to help clinicians validate outputs faster.
 - Client-side FHIR R4 document Bundle export for the active session or a selected history session, with structured Composition sections and optional clinical resources.
 - Optional direct browser-side POST of FHIR export payloads to a configured endpoint, with download-based export still available.
 - Session history with review, edit, duplicate, archive, and delete workflows.
@@ -155,6 +157,7 @@ In some Chrome builds, `chrome://components` may show `Optimization Guide On Dev
 2. Click "Start session"
 3. Speak or simulate a consultation
 4. Stop session to generate summary
+5. Use Structured View and Review Mode to validate extracted and generated content before finalising
 
 ## How It Works
 
@@ -169,6 +172,29 @@ Consultation summaries are generated on-device using Chrome's Prompt API when av
 ### Documents
 
 Document drafts are generated from the transcript using Chrome's on-device model path and stored as editable rich text HTML.
+
+### Structured Extraction
+
+After a session is stopped, the app can extract clinically useful buckets from transcript content, manual notes, and generated summary text.
+
+What this adds in practice:
+
+- A structured view that surfaces key buckets such as problems, medications, allergies, investigations, follow-up actions, diagnoses, safety netting, and admin tasks.
+- Conservative extraction heuristics designed to reduce over-capture while still surfacing high-value items.
+- Manual refresh and in-history editing support, so extracted values remain clinician-controlled.
+- Reuse of structured buckets in downstream outputs, including FHIR resource enrichment and document-generation context.
+
+### Review Mode
+
+Review mode provides a focused quality-check pass for stopped sessions so clinicians can verify what was generated, what was extracted, and what may need attention.
+
+What this adds in practice:
+
+- Confidence-aware transcript highlighting, including a low-confidence-only filter.
+- Review sections for transcript, summary, structured extraction, and generated documents.
+- Provenance labels that indicate whether structured values appear to come from transcript, notes, or summary text.
+- Stale and needs-review badges that flag content likely affected by later edits.
+- Quick review actions (for example regenerate summary/document, re-run extraction, and jump to relevant transcript entries).
 
 ### FHIR Export
 
