@@ -76,6 +76,55 @@
       </div>
     </div>
 
+    <div class="modal-backdrop hidden" id="secureStorageModal" role="dialog" aria-modal="true" aria-labelledby="secureStorageModalTitle">
+      <div class="modal-panel secure-storage-modal-panel">
+        <div class="card-header">
+          <div>
+            <p class="eyebrow">Secure local storage</p>
+            <h3 id="secureStorageModalTitle">Unlock encrypted session history</h3>
+          </div>
+          <button class="btn small" id="closeSecureStorageModalBtn" type="button">Close</button>
+        </div>
+        <div class="modal-copy">
+          <p id="secureStorageModalCopy">Enter your passphrase to unlock encrypted session history stored in this browser.</p>
+          <div class="field" id="secureStoragePassphraseField">
+            <label for="secureStoragePassphraseInput">Passphrase</label>
+            <input id="secureStoragePassphraseInput" type="password" autocomplete="current-password" placeholder="Enter passphrase" />
+            <div class="subtle-note">The passphrase is never stored by this app. The derived key only remains in memory for this tab.</div>
+          </div>
+          <div class="support-banner" id="secureStorageModalError" role="alert"></div>
+        </div>
+        <div class="inline-actions">
+          <button class="btn" id="secureStorageCancelBtn" type="button">Cancel</button>
+          <button class="btn primary" id="unlockSecureStorageBtn" type="button">Unlock session history</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-backdrop hidden" id="destructiveConfirmModal" role="dialog" aria-modal="true" aria-labelledby="destructiveConfirmTitle">
+      <div class="modal-panel secure-storage-modal-panel">
+        <div class="card-header">
+          <div>
+            <p class="eyebrow">Privacy controls</p>
+            <h3 id="destructiveConfirmTitle">Confirm deletion</h3>
+          </div>
+          <button class="btn small" id="closeDestructiveConfirmBtn" type="button">Close</button>
+        </div>
+        <div class="modal-copy">
+          <p id="destructiveConfirmCopy">This action permanently deletes local session data.</p>
+          <div class="field">
+            <label for="destructiveConfirmInput">Type <strong id="destructiveConfirmPhraseLabel">DELETE ALL</strong> to confirm</label>
+            <input id="destructiveConfirmInput" type="text" autocomplete="off" placeholder="Type confirmation text exactly" />
+          </div>
+          <div class="support-banner" id="destructiveConfirmError" role="alert"></div>
+        </div>
+        <div class="inline-actions">
+          <button class="btn" id="cancelDestructiveConfirmBtn" type="button">Cancel</button>
+          <button class="btn danger" id="confirmDestructiveActionBtn" type="button">Delete all sessions</button>
+        </div>
+      </div>
+    </div>
+
     <header class="topbar">
       <div class="brand">
         <div class="brand-mark" aria-hidden="true"></div>
@@ -111,6 +160,7 @@
         </div>
 
         <div class="support-banner" id="speechSupportMessage" role="alert"></div>
+        <div class="support-banner" id="consultationPrivacyMessage" role="alert"></div>
 
         <div class="card form-grid">
           <div class="field">
@@ -247,6 +297,8 @@
           </div>
         </div>
 
+        <div class="support-banner" id="historySecurityMessage" role="alert"></div>
+
         <div class="card filter-grid">
           <div class="field">
             <label for="historyPatientFilter">Filter by patient</label>
@@ -354,6 +406,8 @@
           </div>
         </div>
 
+        <div class="support-banner" id="settingsSecurityMessage" role="alert"></div>
+
         <div class="settings-grid">
           <div class="card settings-card">
             <div class="setting-group">
@@ -395,6 +449,39 @@
 
           <div class="card settings-card">
             <div class="setting-group">
+              <h3>Secure local storage</h3>
+              <div class="setting-row">
+                <div class="toggle-wrap">
+                  <span>Encrypt saved session history at rest</span>
+                  <label class="switch"><input id="settingSecureStorageEnabled" type="checkbox" /><span class="slider"></span></label>
+                </div>
+                <div class="subtle-note">When enabled, transcripts, notes, summaries, and generated documents are encrypted before they are stored locally.</div>
+              </div>
+              <div class="setting-row">
+                <label class="label" for="settingSecureStorageMode">Unlock mode</label>
+                <select id="settingSecureStorageMode">
+                  <option value="passphrase">Passphrase</option>
+                  <option value="session">Session-only key</option>
+                </select>
+                <div class="subtle-note" id="settingSecureStorageHelp">Use a passphrase to reopen encrypted history after refreshing the page.</div>
+              </div>
+              <div class="setting-row">
+                <label class="label" for="settingAutoLockMinutes">Auto-lock after (minutes)</label>
+                <input id="settingAutoLockMinutes" type="number" min="0" max="240" step="1" />
+                <div class="subtle-note">Use 0 to keep the current tab unlocked until it is closed. Session-only keys are always lost after refresh.</div>
+              </div>
+              <div class="setting-row">
+                <div class="readonly-chip" id="settingSecureStorageStatus">Secure local storage is disabled.</div>
+              </div>
+              <div class="inline-actions">
+                <button class="btn small" id="openSecureStorageModalBtn" type="button">Unlock session history</button>
+                <button class="btn small" id="lockSecureStorageBtn" type="button">Lock now</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="card settings-card">
+            <div class="setting-group">
               <h3>Storage and retention</h3>
               <div class="setting-row">
                 <div class="setting-inline">
@@ -405,16 +492,43 @@
                 <div class="subtle-note">Active sessions persist automatically at this interval.</div>
               </div>
               <div class="setting-row">
-                <label class="label" for="settingDataRetentionDays">Data retention (days)</label>
-                <input id="settingDataRetentionDays" type="number" min="0" step="1" />
-                <div class="subtle-note">Sessions older than this are deleted on load and when the setting changes. Use 0 to disable.</div>
-              </div>
-              <div class="setting-row">
                 <label class="label" for="settingTheme">Theme</label>
                 <select id="settingTheme">
                   <option value="light">Light</option>
                   <option value="dark">Dark</option>
                 </select>
+              </div>
+            </div>
+          </div>
+
+          <div class="card settings-card">
+            <div class="setting-group">
+              <h3>Privacy and retention</h3>
+              <div class="setting-row">
+                <label class="label" for="settingDataRetentionDays">Retention days</label>
+                <input id="settingDataRetentionDays" type="number" min="0" step="1" />
+                <div class="subtle-note">Sessions older than this are deleted on load and when the setting changes. Use 0 to disable.</div>
+              </div>
+              <div class="setting-row">
+                <div class="toggle-wrap">
+                  <span>Purge on browser close</span>
+                  <label class="switch"><input id="settingPurgeOnBrowserClose" type="checkbox" /><span class="slider"></span></label>
+                </div>
+                <div class="subtle-note">Best-effort only. The browser may not always allow cleanup to finish before the tab closes.</div>
+              </div>
+              <div class="setting-row">
+                <div class="toggle-wrap">
+                  <span>Ephemeral consultation mode</span>
+                  <label class="switch"><input id="settingEphemeralConsultationMode" type="checkbox" /><span class="slider"></span></label>
+                </div>
+                <div class="subtle-note">New consultations stay in memory only until you explicitly convert them to a saved session.</div>
+              </div>
+              <div class="inline-actions">
+                <button class="btn small" id="purgeOldSessionsNowBtn" type="button">Delete sessions older than retention cutoff now</button>
+                <button class="btn small warning" id="deleteArchivedSessionsBtn" type="button">Delete all archived sessions now</button>
+              </div>
+              <div class="inline-actions">
+                <button class="btn small danger" id="deleteAllSessionsBtn" type="button">Delete all sessions now</button>
               </div>
             </div>
           </div>

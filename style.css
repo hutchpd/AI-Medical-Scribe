@@ -127,6 +127,10 @@
       padding: 24px;
     }
 
+    .secure-storage-modal-panel {
+      width: min(640px, 100%);
+    }
+
     .splash-hero {
       margin-bottom: 22px;
     }
@@ -504,6 +508,11 @@
 
     .support-banner.visible { display: block; }
 
+    .secure-storage-modal-panel .support-banner {
+      margin-top: 14px;
+      margin-bottom: 0;
+    }
+
     .card {
       border-radius: var(--radius-xl);
       border: 1px solid rgba(var(--accent-rgb), 0.08);
@@ -573,6 +582,11 @@
       background: var(--panel);
       color: var(--text);
       font-weight: 600;
+    }
+
+    .readonly-chip.warning {
+      border-color: rgba(var(--warning-rgb), 0.22);
+      background: linear-gradient(180deg, rgba(var(--warning-rgb), 0.10), transparent), var(--panel);
     }
 
     .controls-bar {

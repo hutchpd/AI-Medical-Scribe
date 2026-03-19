@@ -11,6 +11,10 @@
 
       const FHIR_BUNDLE_IDENTIFIER_SYSTEM = 'urn:findonsoftware:ai-medical-scribe:bundle';
       const FHIR_DOCUMENT_LANGUAGE = 'en-GB';
+      const SESSION_STORAGE_ENVELOPE_VERSION = 2;
+      const SESSION_STORAGE_SALT_BYTES = 16;
+      const SESSION_STORAGE_IV_BYTES = 12;
+      const SESSION_STORAGE_PBKDF2_ITERATIONS = 250000;
       const FHIR_COMPOSITION_TYPE = {
         coding: [
           {
@@ -93,6 +97,51 @@
           .replace(/[^a-z0-9]+/g, '-')
           .replace(/^-+|-+$/g, '')
           .slice(0, 48) || 'session';
+      }
+
+      function arrayBufferToBase64(buffer) {
+        const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+        let binary = '';
+        const chunkSize = 0x8000;
+        for (let index = 0; index < bytes.length; index += chunkSize) {
+          binary += String.fromCharCode.apply(null, Array.from(bytes.slice(index, index + chunkSize)));
+        }
+        return window.btoa(binary);
+      }
+
+      function base64ToUint8Array(value) {
+        const source = String(value || '');
+        if (!source) return new Uint8Array(0);
+        const binary = window.atob(source);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+        return bytes;
+      }
+
+      function isWebCryptoAvailable() {
+        return Boolean(globalThis.crypto && globalThis.crypto.subtle);
+      }
+
+      function getRandomBytes(length) {
+        const bytes = new Uint8Array(length);
+        globalThis.crypto.getRandomValues(bytes);
+        return bytes;
+      }
+
+      function isCryptoKeyLike(value) {
+        return Boolean(value && typeof value === 'object' && typeof value.type === 'string' && value.algorithm);
+      }
+
+      function isEncryptedSessionEnvelope(value) {
+        return Boolean(
+          value &&
+          typeof value === 'object' &&
+          value.encrypted === true &&
+          Number(value.version) >= SESSION_STORAGE_ENVELOPE_VERSION &&
+          typeof value.mode === 'string' &&
+          typeof value.iv === 'string' &&
+          typeof value.cipherText === 'string'
+        );
       }
 
       function createDefaultSummaryPrompt() {
@@ -337,6 +386,89 @@
           binary += String.fromCharCode.apply(null, chunk);
         }
         return window.btoa(binary);
+      }
+
+      // These helpers protect session payloads before they are written to localStorage.
+      // Keys are kept in memory only, and plaintext writes are blocked when secure mode is enabled.
+      async function deriveKeyFromPassphrase(passphrase, salt) {
+        if (!isWebCryptoAvailable()) throw new Error('Web Crypto API is unavailable in this browser.');
+        const normalizedPassphrase = String(passphrase || '');
+        if (!normalizedPassphrase) throw new Error('Enter a passphrase to unlock secure storage.');
+        const saltBytes = salt instanceof Uint8Array ? salt : base64ToUint8Array(salt);
+        const keyMaterial = await globalThis.crypto.subtle.importKey(
+          'raw',
+          new TextEncoder().encode(normalizedPassphrase),
+          'PBKDF2',
+          false,
+          ['deriveKey']
+        );
+        return globalThis.crypto.subtle.deriveKey(
+          {
+            name: 'PBKDF2',
+            salt: saltBytes,
+            iterations: SESSION_STORAGE_PBKDF2_ITERATIONS,
+            hash: 'SHA-256'
+          },
+          keyMaterial,
+          { name: 'AES-GCM', length: 256 },
+          false,
+          ['encrypt', 'decrypt']
+        );
+      }
+
+      async function generateInMemorySessionKey() {
+        if (!isWebCryptoAvailable()) throw new Error('Web Crypto API is unavailable in this browser.');
+        return globalThis.crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+      }
+
+      async function encryptJsonValue(value, secretOrKey, mode) {
+        if (!isWebCryptoAvailable()) throw new Error('Web Crypto API is unavailable in this browser.');
+        const selectedMode = mode === 'session' ? 'session' : 'passphrase';
+        const salt = getRandomBytes(SESSION_STORAGE_SALT_BYTES);
+        const iv = getRandomBytes(SESSION_STORAGE_IV_BYTES);
+        const key = selectedMode === 'session'
+          ? secretOrKey
+          : await deriveKeyFromPassphrase(secretOrKey, salt);
+
+        if (!isCryptoKeyLike(key)) throw new Error('Secure storage is locked.');
+
+        const plainText = JSON.stringify(value);
+        const cipherBuffer = await globalThis.crypto.subtle.encrypt(
+          { name: 'AES-GCM', iv },
+          key,
+          new TextEncoder().encode(plainText)
+        );
+
+        return {
+          version: SESSION_STORAGE_ENVELOPE_VERSION,
+          encrypted: true,
+          mode: selectedMode,
+          salt: arrayBufferToBase64(salt),
+          iv: arrayBufferToBase64(iv),
+          cipherText: arrayBufferToBase64(cipherBuffer),
+          updatedAt: Date.now()
+        };
+      }
+
+      async function decryptJsonValue(envelope, secretOrKey) {
+        if (!isEncryptedSessionEnvelope(envelope)) throw new Error('Encrypted session storage is invalid.');
+        if (!isWebCryptoAvailable()) throw new Error('Web Crypto API is unavailable in this browser.');
+
+        const iv = base64ToUint8Array(envelope.iv);
+        const cipherBytes = base64ToUint8Array(envelope.cipherText);
+        const key = envelope.mode === 'session'
+          ? secretOrKey
+          : await deriveKeyFromPassphrase(secretOrKey, base64ToUint8Array(envelope.salt));
+
+        if (!isCryptoKeyLike(key)) throw new Error('Secure storage is locked.');
+
+        try {
+          const plainBuffer = await globalThis.crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, cipherBytes);
+          return safeParse(new TextDecoder().decode(plainBuffer), null);
+        } catch (error) {
+          if (envelope.mode === 'passphrase') throw new Error('The passphrase did not unlock this encrypted session history.');
+          throw new Error('The in-memory session key is unavailable for this encrypted session history.');
+        }
       }
 
       function escapeXmlText(text) {
@@ -636,6 +768,12 @@
           autoPunctuation: true,
           interimResults: true,
           saveRawTranscript: true,
+          secureStorageEnabled: false,
+          secureStorageMode: 'passphrase',
+          secureStorageUnlocked: false,
+          autoLockMinutes: 15,
+          purgeOnBrowserClose: false,
+          ephemeralConsultationMode: false,
           autoSaveInterval: 5,
           theme: 'light',
           dataRetentionDays: 180,
@@ -705,6 +843,7 @@
           summaryError: String(overrides.summaryError || ''),
           summaryPrompt: String(overrides.summaryPrompt || ''),
           summarySignature: String(overrides.summarySignature || ''),
+          ephemeral: Boolean(overrides.ephemeral),
           documents: Array.isArray(overrides.documents) ? overrides.documents.map((documentItem) => createSessionDocument(documentItem)) : []
         };
       }
@@ -714,6 +853,7 @@
         session.transcriptEntries = (Array.isArray(rawSession && rawSession.transcriptEntries) ? rawSession.transcriptEntries : []).map((entry) => createTranscriptEntry(entry));
         session.documents = (Array.isArray(rawSession && rawSession.documents) ? rawSession.documents : []).map((documentItem) => createSessionDocument(documentItem));
         session.tags = dedupeStrings(rawSession && rawSession.tags);
+        session.ephemeral = Boolean(rawSession && rawSession.ephemeral);
         if (session.status === 'listening') {
           session.status = 'paused';
           session.lastStartedSegmentAt = null;
@@ -770,6 +910,12 @@
         const saved = readStorage(STORAGE_KEYS.settings, {});
         const merged = Object.assign(createDefaultSettings(), saved || {});
         merged.autoSaveInterval = clamp(Number(merged.autoSaveInterval) || 5, 1, 30);
+        merged.secureStorageEnabled = Boolean(merged.secureStorageEnabled);
+        merged.secureStorageMode = merged.secureStorageMode === 'session' ? 'session' : 'passphrase';
+        merged.secureStorageUnlocked = false;
+        merged.autoLockMinutes = clamp(Number(merged.autoLockMinutes) || 15, 0, 240);
+        merged.purgeOnBrowserClose = Boolean(merged.purgeOnBrowserClose);
+        merged.ephemeralConsultationMode = Boolean(merged.ephemeralConsultationMode);
         merged.dataRetentionDays = Math.max(0, Number(merged.dataRetentionDays) || 0);
         merged.transcriptFontSize = clamp(Number(merged.transcriptFontSize) || 16, 14, 24);
         merged.transcriptLineSpacing = clamp(Number(merged.transcriptLineSpacing) || 1.55, 1.2, 2);
@@ -783,8 +929,14 @@
         return merged;
       }
 
+      function getPersistableSettings() {
+        const settings = Object.assign({}, state.settings || {});
+        delete settings.secureStorageUnlocked;
+        return settings;
+      }
+
       function saveSettings() {
-        if (!writeStorage(STORAGE_KEYS.settings, state.settings)) showToast('Unable to save settings locally.', 'error', 4200);
+        if (!writeStorage(STORAGE_KEYS.settings, getPersistableSettings())) showToast('Unable to save settings locally.', 'error', 4200);
       }
 
       function loadCustomisation() {
@@ -811,37 +963,457 @@
         if (!writeStorage(STORAGE_KEYS.customisation, state.customisation)) showToast('Unable to save customisation locally.', 'error', 4200);
       }
 
-      function loadSessions() {
-        const saved = readStorage(STORAGE_KEYS.sessions, []);
-        const sessions = Array.isArray(saved) ? saved.map(normaliseSession) : [];
-        sessions.sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
-        return sessions;
+      function sortSessionsByUpdatedAt(sessions) {
+        return sessions.sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
       }
 
-      function persistSessions() {
+      function normaliseSessionCollection(rawSessions) {
+        const sessions = Array.isArray(rawSessions) ? rawSessions.map(normaliseSession) : [];
+        return sortSessionsByUpdatedAt(sessions);
+      }
+
+      function createSecureStorageRuntimeState() {
+        return {
+          unlocked: false,
+          key: null,
+          passphrase: '',
+          lockedEnvelope: null,
+          lockReason: '',
+          showUnlockModal: false,
+          modalError: '',
+          persistWarning: '',
+          lastPersistErrorAt: 0,
+          lastPersistErrorMessage: '',
+          autoLockTimerId: null,
+          lastUnlockAt: null
+        };
+      }
+
+      function createSessionLockState() {
+        return {
+          isLocked: false,
+          lastUnlockAt: null,
+          lastActivityAt: Date.now(),
+          unlockMode: 'passphrase',
+          lockedReason: null
+        };
+      }
+
+      function createDestructiveConfirmState() {
+        return {
+          isOpen: false,
+          action: '',
+          phrase: 'DELETE ALL',
+          title: 'Confirm deletion',
+          message: 'This action permanently deletes local session data.',
+          confirmLabel: 'Confirm',
+          error: ''
+        };
+      }
+
+      function mergeSessionCollections(primarySessions, secondarySessions) {
+        const sessionMap = new Map();
+        secondarySessions.concat(primarySessions).forEach((session) => {
+          if (!session || !session.id) return;
+          const existing = sessionMap.get(session.id);
+          if (!existing || (session.updatedAt || 0) >= (existing.updatedAt || 0)) sessionMap.set(session.id, session);
+        });
+        return sortSessionsByUpdatedAt(Array.from(sessionMap.values()));
+      }
+
+      function isEphemeralSession(session) {
+        return Boolean(session && session.ephemeral);
+      }
+
+      function getPersistableSessionsSnapshot() {
+        return deepClone(sortSessionsByUpdatedAt(state.sessions.filter((session) => !isEphemeralSession(session)).slice()));
+      }
+
+      function getRetentionCutoffTimestamp() {
+        const retentionDays = Number(state.settings.dataRetentionDays);
+        if (!Number.isFinite(retentionDays) || retentionDays <= 0) return null;
+        return Date.now() - (retentionDays * 24 * 60 * 60 * 1000);
+      }
+
+      function isSessionProtectedFromAutomaticRetentionPurge(session) {
+        return Boolean(session && state.activeSession && state.activeSession.id === session.id && session.status !== 'stopped');
+      }
+
+      function getSessionRetentionAnchor(session) {
+        return session && (session.startedAt || session.createdAt || session.updatedAt || Date.now());
+      }
+
+      function clearSessionStorageBestEffort() {
         try {
-          state.sessions.sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
-          if (!writeStorage(STORAGE_KEYS.sessions, state.sessions)) throw new Error('write failed');
+          window.localStorage.removeItem(STORAGE_KEYS.sessions);
+          return true;
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function renderDestructiveConfirmModal() {
+        if (!refs.destructiveConfirmModal) return;
+        refs.destructiveConfirmModal.classList.toggle('hidden', !state.destructiveConfirm.isOpen);
+        refs.destructiveConfirmTitle.textContent = state.destructiveConfirm.title;
+        refs.destructiveConfirmCopy.textContent = state.destructiveConfirm.message;
+        refs.destructiveConfirmPhraseLabel.textContent = state.destructiveConfirm.phrase;
+        refs.confirmDestructiveActionBtn.textContent = state.destructiveConfirm.confirmLabel;
+        renderSupportBanner(refs.destructiveConfirmError, state.destructiveConfirm.error);
+      }
+
+      function openDestructiveConfirmModal(config) {
+        state.destructiveConfirm.isOpen = true;
+        state.destructiveConfirm.action = config.action;
+        state.destructiveConfirm.phrase = config.phrase || 'DELETE ALL';
+        state.destructiveConfirm.title = config.title || 'Confirm deletion';
+        state.destructiveConfirm.message = config.message || 'This action permanently deletes local session data.';
+        state.destructiveConfirm.confirmLabel = config.confirmLabel || 'Confirm';
+        state.destructiveConfirm.error = '';
+        if (refs.destructiveConfirmInput) refs.destructiveConfirmInput.value = '';
+        renderDestructiveConfirmModal();
+        window.setTimeout(() => {
+          if (refs.destructiveConfirmInput) refs.destructiveConfirmInput.focus();
+        }, 0);
+      }
+
+      function closeDestructiveConfirmModal() {
+        state.destructiveConfirm.isOpen = false;
+        state.destructiveConfirm.error = '';
+        if (refs.destructiveConfirmInput) refs.destructiveConfirmInput.value = '';
+        renderDestructiveConfirmModal();
+      }
+
+      function maybeResetSelectionAfterRemoval() {
+        if (state.activeSession && !state.sessions.find((session) => session.id === state.activeSession.id)) resetConsultationDraft();
+        if (state.historySelectedSessionId && !state.sessions.find((session) => session.id === state.historySelectedSessionId)) {
+          state.historySelectedSessionId = null;
+          state.historyEditMode = false;
+        }
+      }
+
+      async function removeSessionsByPredicate(predicate, options = {}) {
+        const sessionsToRemove = state.sessions.filter((session) => predicate(session));
+        if (!sessionsToRemove.length) return { removedCount: 0, removedActive: false, didPersist: true };
+        const removedActive = Boolean(state.activeSession && sessionsToRemove.some((session) => session.id === state.activeSession.id));
+        state.sessions = state.sessions.filter((session) => !predicate(session));
+        maybeResetSelectionAfterRemoval();
+        const didPersist = options.skipPersist ? true : await persistSessions();
+        return { removedCount: sessionsToRemove.length, removedActive, didPersist };
+      }
+
+      async function deleteArchivedSessionsNow() {
+        if (!window.confirm('Delete all archived sessions from this browser now?')) return;
+        const result = await removeSessionsByPredicate((session) => session.archived);
+        if (!result.removedCount) {
+          showToast('There are no archived sessions to delete.', 'info', 2600);
+          return;
+        }
+        renderConsultation();
+        renderHistory();
+        renderDocumentsTab();
+        showToast('Deleted ' + result.removedCount + ' archived session' + (result.removedCount === 1 ? '' : 's') + '.', 'success', 3200);
+      }
+
+      async function purgeSessionsOlderThanRetentionNow() {
+        const cutoff = getRetentionCutoffTimestamp();
+        if (!cutoff) {
+          showToast('Set retention days above 0 before running a retention purge.', 'warning', 3200);
+          return;
+        }
+        const eligibleCount = state.sessions.filter((session) => !isSessionProtectedFromAutomaticRetentionPurge(session) && getSessionRetentionAnchor(session) < cutoff).length;
+        if (!eligibleCount) {
+          showToast('No sessions are currently older than the retention cutoff.', 'info', 2600);
+          return;
+        }
+        if (!window.confirm('Delete ' + eligibleCount + ' session' + (eligibleCount === 1 ? '' : 's') + ' older than the current retention cutoff?')) return;
+        const result = await removeSessionsByPredicate((session) => !isSessionProtectedFromAutomaticRetentionPurge(session) && getSessionRetentionAnchor(session) < cutoff);
+        renderConsultation();
+        renderHistory();
+        renderDocumentsTab();
+        showToast('Deleted ' + result.removedCount + ' session' + (result.removedCount === 1 ? '' : 's') + '.', 'success', 3200);
+      }
+
+      function deleteAllSessionsNow() {
+        openDestructiveConfirmModal({
+          action: 'delete-all-sessions',
+          phrase: 'DELETE ALL',
+          title: 'Delete all sessions',
+          message: 'This permanently deletes every saved or in-memory consultation in this browser, including archived sessions and any active consultation.',
+          confirmLabel: 'Delete all sessions'
+        });
+      }
+
+      async function executeDestructiveConfirmAction() {
+        if (state.destructiveConfirm.action !== 'delete-all-sessions') return;
+        const typedPhrase = normaliseWhitespace((refs.destructiveConfirmInput && refs.destructiveConfirmInput.value) || '').toUpperCase();
+        if (typedPhrase !== state.destructiveConfirm.phrase) {
+          state.destructiveConfirm.error = 'Type ' + state.destructiveConfirm.phrase + ' exactly to continue.';
+          renderDestructiveConfirmModal();
+          return;
+        }
+        const removedCount = state.sessions.length;
+        if (state.speechProvider) state.speechProvider.stop();
+        stopTimer();
+        state.sessions = [];
+        state.historySelectedSessionId = null;
+        state.historyEditMode = false;
+        state.secureStorage.lockedEnvelope = null;
+        state.secureStorage.persistWarning = '';
+        state.lastPersistedAt = null;
+        state.interimText = '';
+        clearSessionStorageBestEffort();
+        resetConsultationDraft();
+        closeDestructiveConfirmModal();
+        renderConsultation();
+        renderHistory();
+        renderDocumentsTab();
+        renderLastSavedLabel();
+        showToast('Deleted ' + removedCount + ' session' + (removedCount === 1 ? '' : 's') + ' from this browser.', 'success', 3600);
+      }
+
+      function clearSecureStorageAutoLockTimer() {
+        if (!state || !state.secureStorage) return;
+        window.clearTimeout(state.secureStorage.autoLockTimerId);
+        state.secureStorage.autoLockTimerId = null;
+      }
+
+      function armSecureStorageAutoLockTimer() {
+        clearSecureStorageAutoLockTimer();
+        if (!state.settings.secureStorageEnabled || state.sessionLock.isLocked) return;
+        const minutes = Number(state.settings.autoLockMinutes);
+        if (!Number.isFinite(minutes) || minutes <= 0) return;
+        const inactivityMs = minutes * 60 * 1000;
+        const elapsed = Math.max(0, Date.now() - Number(state.sessionLock.lastActivityAt || Date.now()));
+        const remaining = Math.max(0, inactivityMs - elapsed);
+        state.secureStorage.autoLockTimerId = window.setTimeout(() => {
+          lockSessionUi('inactivity', { showFeedback: true });
+        }, remaining);
+      }
+
+      function clearSecureStorageAccess() {
+        clearSecureStorageAutoLockTimer();
+        state.secureStorage.key = null;
+        state.secureStorage.passphrase = '';
+        state.secureStorage.unlocked = false;
+        state.settings.secureStorageUnlocked = false;
+      }
+
+      function markSecureStorageUnlocked(key, passphrase = '') {
+        state.secureStorage.key = key;
+        state.secureStorage.passphrase = String(passphrase || '');
+        state.secureStorage.unlocked = true;
+        state.settings.secureStorageUnlocked = true;
+        state.secureStorage.lockReason = '';
+        state.secureStorage.modalError = '';
+        state.secureStorage.persistWarning = '';
+        state.secureStorage.lastUnlockAt = Date.now();
+        state.sessionLock.lastUnlockAt = state.secureStorage.lastUnlockAt;
+        state.sessionLock.lastActivityAt = Date.now();
+        state.sessionLock.unlockMode = getEffectiveSecureStorageMode();
+        armSecureStorageAutoLockTimer();
+      }
+
+      function hasLockedSessionEnvelope() {
+        return Boolean(state.secureStorage.lockedEnvelope && !state.secureStorage.unlocked);
+      }
+
+      function getLockedSessionPersistMessage() {
+        if (!hasLockedSessionEnvelope()) return '';
+        if (state.secureStorage.lockedEnvelope.mode === 'session') return 'Encrypted session history is locked and cannot be reopened after refresh in session-only mode. The stored payload has been left untouched.';
+        return 'Encrypted session history is locked. Enter the passphrase to load saved sessions and resume secure saves.';
+      }
+
+      function isSessionUiLocked() {
+        return Boolean(state.settings.secureStorageEnabled && state.sessionLock.isLocked);
+      }
+
+      function getSessionLockReasonMessage() {
+        if (!isSessionUiLocked()) return '';
+        if (state.sessionLock.lockedReason === 'session-key-unavailable') return 'This tab no longer has the in-memory session key required to unlock previously encrypted session history.';
+        if (state.sessionLock.lockedReason === 'inactivity') return 'The app locked after a period of inactivity.';
+        if (state.sessionLock.lockedReason === 'manual') return 'The app was locked manually.';
+        if (state.sessionLock.lockedReason === 'passphrase-required') return 'Enter the secure storage passphrase to view saved consultation data.';
+        return 'Unlock the app to view sensitive consultation data.';
+      }
+
+      function getSessionLockPlaceholderText(area) {
+        const areaLabel = area || 'session data';
+        if (state.sessionLock.unlockMode === 'session' && state.sessionLock.lockedReason === 'session-key-unavailable') {
+          return 'Protected ' + areaLabel + ' cannot be reopened after refresh because the session-only key was only kept in memory.';
+        }
+        return 'Protected ' + areaLabel + ' is hidden while the app is locked.';
+      }
+
+      function renderLockedPlaceholder(text, size = 'small') {
+        return '<div class="empty-state' + (size === 'small' ? ' small' : '') + '">' + escapeHtml(text) + '</div>';
+      }
+
+      function stopActiveSessionForLock() {
+        if (!state.activeSession || !['listening', 'paused'].includes(state.activeSession.status)) return;
+        stopListening();
+        showToast('The active consultation was stopped before the app locked.', 'warning', 4200);
+      }
+
+      function lockSessionUi(reason, options = {}) {
+        const shouldShowFeedback = options.showFeedback !== false;
+        if (!state.settings.secureStorageEnabled && !hasLockedSessionEnvelope()) return;
+        stopActiveSessionForLock();
+        state.sessionLock.isLocked = true;
+        state.sessionLock.unlockMode = getEffectiveSecureStorageMode();
+        state.sessionLock.lockedReason = reason || 'manual';
+        state.secureStorage.showUnlockModal = false;
+        state.secureStorage.modalError = '';
+
+        if (state.sessionLock.unlockMode === 'passphrase' || hasLockedSessionEnvelope()) {
+          clearSecureStorageAccess();
+        } else {
+          clearSecureStorageAutoLockTimer();
+        }
+
+        renderConsultation();
+        renderHistory();
+        renderDocumentsTab();
+        renderSettingsForm();
+        renderSecureStorageModal();
+
+        if (shouldShowFeedback) {
+          const message = reason === 'inactivity' ? 'The app locked after inactivity.' : 'The app is now locked.';
+          showToast(message, 'info', 2600);
+        }
+      }
+
+      function unlockSessionUi() {
+        state.sessionLock.isLocked = false;
+        state.sessionLock.lockedReason = null;
+        state.sessionLock.unlockMode = getEffectiveSecureStorageMode();
+        state.sessionLock.lastUnlockAt = Date.now();
+        state.sessionLock.lastActivityAt = Date.now();
+        state.secureStorage.showUnlockModal = false;
+        armSecureStorageAutoLockTimer();
+        renderConsultation();
+        renderHistory();
+        renderDocumentsTab();
+        renderSettingsForm();
+        renderSecureStorageModal();
+      }
+
+      function recordSessionActivity() {
+        if (!state.settings.secureStorageEnabled || isSessionUiLocked()) return;
+        state.sessionLock.lastActivityAt = Date.now();
+        armSecureStorageAutoLockTimer();
+      }
+
+      async function ensureRuntimeSessionKey() {
+        if (hasLockedSessionEnvelope()) throw new Error(getLockedSessionPersistMessage());
+        if (state.secureStorage.unlocked && isCryptoKeyLike(state.secureStorage.key)) return state.secureStorage.key;
+        const key = await generateInMemorySessionKey();
+        markSecureStorageUnlocked(key);
+        return key;
+      }
+
+      async function loadSessions() {
+        const saved = readStorage(STORAGE_KEYS.sessions, []);
+        if (Array.isArray(saved)) {
+          state.sessions = normaliseSessionCollection(saved);
+          state.secureStorage.lockedEnvelope = null;
+          state.secureStorage.lockReason = '';
+          state.secureStorage.persistWarning = '';
+          return state.sessions;
+        }
+        if (isEncryptedSessionEnvelope(saved)) {
+          clearSecureStorageAccess();
+          state.sessions = [];
+          state.secureStorage.lockedEnvelope = saved;
+          state.secureStorage.lockReason = saved.mode === 'session' ? 'session-key-unavailable' : 'passphrase-required';
+          state.secureStorage.persistWarning = getLockedSessionPersistMessage();
+          return state.sessions;
+        }
+        state.sessions = [];
+        state.secureStorage.lockedEnvelope = null;
+        state.secureStorage.lockReason = '';
+        state.secureStorage.persistWarning = '';
+        return state.sessions;
+      }
+
+      async function persistSessions() {
+        const persistToken = uid('persist');
+        const snapshot = getPersistableSessionsSnapshot();
+        state.sessionPersistToken = persistToken;
+        try {
+          let payload = snapshot;
+
+          if (hasLockedSessionEnvelope()) throw new Error(getLockedSessionPersistMessage());
+
+          if (!snapshot.length) {
+            if (state.sessionPersistToken !== persistToken) return false;
+            clearSessionStorageBestEffort();
+            state.lastPersistedAt = null;
+            state.secureStorage.persistWarning = '';
+            state.secureStorage.lastPersistErrorAt = 0;
+            state.secureStorage.lastPersistErrorMessage = '';
+            renderLastSavedLabel();
+            if (state.currentTab === 'history') {
+              renderHistoryList();
+              if (!state.historyEditMode) renderHistoryDetail();
+            }
+            renderSettingsForm();
+            return true;
+          }
+
+          if (state.settings.secureStorageEnabled) {
+            if (!isWebCryptoAvailable()) throw new Error('Web Crypto API is unavailable in this browser, so secure local storage cannot be used here.');
+            const mode = state.settings.secureStorageMode === 'session' ? 'session' : 'passphrase';
+            if (mode === 'session') {
+              const key = await ensureRuntimeSessionKey();
+              payload = await encryptJsonValue(snapshot, key, mode);
+            } else {
+              const passphrase = String(state.secureStorage.passphrase || '');
+              if (!state.secureStorage.unlocked || !passphrase) throw new Error('Secure local storage is enabled but locked. Enter the passphrase before sessions can be saved.');
+              payload = await encryptJsonValue(snapshot, passphrase, mode);
+            }
+            armSecureStorageAutoLockTimer();
+          }
+
+          if (state.sessionPersistToken !== persistToken) return false;
+          if (!writeStorage(STORAGE_KEYS.sessions, payload)) throw new Error('write failed');
           state.lastPersistedAt = Date.now();
+          state.secureStorage.persistWarning = '';
+          state.secureStorage.lastPersistErrorAt = 0;
+          state.secureStorage.lastPersistErrorMessage = '';
           renderLastSavedLabel();
           if (state.currentTab === 'history') {
             renderHistoryList();
             if (!state.historyEditMode) renderHistoryDetail();
           }
+          renderSettingsForm();
+          return true;
         } catch (error) {
-          showToast('Unable to save locally. Local storage may be full or unavailable.', 'error', 4200);
+          const detail = normaliseWhitespace(error && error.message ? error.message : String(error || ''));
+          state.secureStorage.persistWarning = detail || 'Unable to save locally.';
+          renderLastSavedLabel();
+          renderSettingsForm();
+          renderHistory();
+          const now = Date.now();
+          if (detail !== state.secureStorage.lastPersistErrorMessage || (now - state.secureStorage.lastPersistErrorAt) > 4000) {
+            state.secureStorage.lastPersistErrorMessage = detail;
+            state.secureStorage.lastPersistErrorAt = now;
+            showToast(detail || 'Unable to save locally. Local storage may be full or unavailable.', 'error', 4200);
+          }
+          return false;
         }
       }
 
       function purgeOldSessions() {
-        const retentionDays = Number(state.settings.dataRetentionDays);
-        if (!Number.isFinite(retentionDays) || retentionDays <= 0) return 0;
-        const cutoff = Date.now() - (retentionDays * 24 * 60 * 60 * 1000);
+        const cutoff = getRetentionCutoffTimestamp();
+        if (!cutoff) return 0;
         const beforeCount = state.sessions.length;
         state.sessions = state.sessions.filter((session) => {
-          const anchor = session.startedAt || session.createdAt || session.updatedAt || Date.now();
+          if (isSessionProtectedFromAutomaticRetentionPurge(session)) return true;
+          const anchor = getSessionRetentionAnchor(session);
           return anchor >= cutoff;
         });
+        maybeResetSelectionAfterRemoval();
         return beforeCount - state.sessions.length;
       }
 
@@ -851,7 +1423,7 @@
         currentTab: 'consultation',
         settings: loadSettings(),
         customisation: loadCustomisation(),
-        sessions: loadSessions(),
+        sessions: [],
         activeSession: null,
         consultationDraftTags: [],
         interimText: '',
@@ -875,7 +1447,11 @@
         speechProvider: null,
         supportsSpeech: 'webkitSpeechRecognition' in window,
         summaryRequestTokens: {},
-        lastPersistedAt: null
+        lastPersistedAt: null,
+        secureStorage: createSecureStorageRuntimeState(),
+        sessionLock: createSessionLockState(),
+        destructiveConfirm: createDestructiveConfirmState(),
+        sessionPersistToken: null
       };
 
       const refs = {
@@ -894,10 +1470,29 @@
         continueFromSplashBtn: $('continueFromSplashBtn'),
         apiHelpModal: $('apiHelpModal'),
         closeApiHelpBtn: $('closeApiHelpBtn'),
+        secureStorageModal: $('secureStorageModal'),
+        closeSecureStorageModalBtn: $('closeSecureStorageModalBtn'),
+        secureStorageCancelBtn: $('secureStorageCancelBtn'),
+        secureStorageModalTitle: $('secureStorageModalTitle'),
+        secureStorageModalCopy: $('secureStorageModalCopy'),
+        secureStoragePassphraseField: $('secureStoragePassphraseField'),
+        secureStoragePassphraseInput: $('secureStoragePassphraseInput'),
+        secureStorageModalError: $('secureStorageModalError'),
+        unlockSecureStorageBtn: $('unlockSecureStorageBtn'),
+        destructiveConfirmModal: $('destructiveConfirmModal'),
+        closeDestructiveConfirmBtn: $('closeDestructiveConfirmBtn'),
+        destructiveConfirmTitle: $('destructiveConfirmTitle'),
+        destructiveConfirmCopy: $('destructiveConfirmCopy'),
+        destructiveConfirmInput: $('destructiveConfirmInput'),
+        destructiveConfirmPhraseLabel: $('destructiveConfirmPhraseLabel'),
+        destructiveConfirmError: $('destructiveConfirmError'),
+        cancelDestructiveConfirmBtn: $('cancelDestructiveConfirmBtn'),
+        confirmDestructiveActionBtn: $('confirmDestructiveActionBtn'),
         manualNotes: $('manualNotes'),
         statusPill: $('statusPill'),
         sessionTimer: $('sessionTimer'),
         speechSupportMessage: $('speechSupportMessage'),
+        consultationPrivacyMessage: $('consultationPrivacyMessage'),
         transcriptEditHint: $('transcriptEditHint'),
         transcriptContainer: $('transcriptContainer'),
         interimContainer: $('interimContainer'),
@@ -934,6 +1529,7 @@
         historyClinicianFilter: $('historyClinicianFilter'),
         historyDateFilter: $('historyDateFilter'),
         historyHideArchived: $('historyHideArchived'),
+        historySecurityMessage: $('historySecurityMessage'),
         historyDetail: $('historyDetail'),
         historyEditToggle: $('historyEditToggle'),
         historySaveBtn: $('historySaveBtn'),
@@ -943,16 +1539,29 @@
         settingAutoPunctuation: $('settingAutoPunctuation'),
         settingInterimResults: $('settingInterimResults'),
         settingSaveRawTranscript: $('settingSaveRawTranscript'),
+        settingSecureStorageEnabled: $('settingSecureStorageEnabled'),
+        settingSecureStorageMode: $('settingSecureStorageMode'),
+        settingAutoLockMinutes: $('settingAutoLockMinutes'),
+        settingSecureStorageStatus: $('settingSecureStorageStatus'),
+        settingSecureStorageHelp: $('settingSecureStorageHelp'),
+        openSecureStorageModalBtn: $('openSecureStorageModalBtn'),
+        lockSecureStorageBtn: $('lockSecureStorageBtn'),
         settingAutoSaveInterval: $('settingAutoSaveInterval'),
         settingAutoSaveIntervalValue: $('settingAutoSaveIntervalValue'),
         settingTheme: $('settingTheme'),
         settingDataRetentionDays: $('settingDataRetentionDays'),
+        settingPurgeOnBrowserClose: $('settingPurgeOnBrowserClose'),
+        settingEphemeralConsultationMode: $('settingEphemeralConsultationMode'),
+        purgeOldSessionsNowBtn: $('purgeOldSessionsNowBtn'),
+        deleteArchivedSessionsBtn: $('deleteArchivedSessionsBtn'),
+        deleteAllSessionsBtn: $('deleteAllSessionsBtn'),
         settingTranscriptFontSize: $('settingTranscriptFontSize'),
         settingTranscriptFontSizeValue: $('settingTranscriptFontSizeValue'),
         settingLineSpacing: $('settingLineSpacing'),
         settingLineSpacingValue: $('settingLineSpacingValue'),
         settingSummaryPrompt: $('settingSummaryPrompt'),
         settingSummaryAvailability: $('settingSummaryAvailability'),
+        settingsSecurityMessage: $('settingsSecurityMessage'),
         documentsTemplateSelect: $('documentsTemplateSelect'),
         documentsGenerateBtn: $('documentsGenerateBtn'),
         documentsList: $('documentsList'),
@@ -1181,6 +1790,155 @@
       function closeApiHelpModal() {
         state.showApiHelpModal = false;
         renderSplashScreen();
+      }
+
+      function getEffectiveSecureStorageMode() {
+        return state.secureStorage.lockedEnvelope ? state.secureStorage.lockedEnvelope.mode : state.settings.secureStorageMode;
+      }
+
+      function canPromptForSecureStoragePassphrase() {
+        return getEffectiveSecureStorageMode() === 'passphrase';
+      }
+
+      function canUnlockCurrentSession() {
+        if (!state.settings.secureStorageEnabled && !hasLockedSessionEnvelope()) return false;
+        if (canPromptForSecureStoragePassphrase()) return true;
+        if (hasLockedSessionEnvelope()) return false;
+        return isCryptoKeyLike(state.secureStorage.key) || state.secureStorage.unlocked || !state.settings.secureStorageEnabled;
+      }
+
+      function getSecureStorageWarningMessage() {
+        if (isSessionUiLocked()) return getSessionLockReasonMessage();
+        if (hasLockedSessionEnvelope()) {
+          if (state.secureStorage.lockedEnvelope.mode === 'session') {
+            return 'Encrypted session history was saved with a session-only key and this tab no longer has that in-memory key. The locked payload has been preserved, but it cannot be reopened after refresh.';
+          }
+          return 'Encrypted session history is locked. Enter the secure storage passphrase to load saved sessions. Until then, changes remain in memory only and will not overwrite the locked payload.';
+        }
+        if (state.settings.secureStorageEnabled && state.settings.secureStorageMode === 'passphrase' && !state.secureStorage.unlocked) {
+          return 'Secure local storage is enabled but currently locked. Enter the passphrase before sessions can be saved locally.';
+        }
+        return state.secureStorage.persistWarning || '';
+      }
+
+      function getSecureStorageStatusText() {
+        if (hasLockedSessionEnvelope()) {
+          return state.secureStorage.lockedEnvelope.mode === 'session'
+            ? 'Locked encrypted history cannot be reopened because the session-only key was lost after refresh.'
+            : 'Encrypted session history is locked until the correct passphrase is entered.';
+        }
+        if (!state.settings.secureStorageEnabled) return 'Secure local storage is disabled.';
+        if (state.settings.secureStorageMode === 'session') {
+          return state.secureStorage.unlocked
+            ? 'Secure local storage is enabled with a session-only key for this tab.'
+            : 'Secure local storage is enabled. A new session-only key will be created in memory on the next save.';
+        }
+        return state.secureStorage.unlocked
+          ? 'Secure local storage is enabled and currently unlocked for this tab.'
+          : 'Secure local storage is enabled but locked.';
+      }
+
+      function getSecureStorageHelpText() {
+        if (!isWebCryptoAvailable()) return 'Web Crypto API is unavailable in this browser, so encrypted local storage cannot be used here.';
+        if (getEffectiveSecureStorageMode() === 'session') return 'Session-only mode keeps the AES key in memory and never stores it. Refreshing or closing the tab makes previously encrypted history unavailable.';
+        return 'Passphrase mode lets you reopen encrypted history after refresh by entering the same passphrase again. The passphrase is never stored by this app.';
+      }
+
+      function renderSupportBanner(target, message) {
+        if (!target) return;
+        const content = normaliseWhitespace(message);
+        target.classList.toggle('visible', Boolean(content));
+        target.textContent = content;
+      }
+
+      function openSecureStorageModal() {
+        if (!canPromptForSecureStoragePassphrase() && !isSessionUiLocked()) {
+          showToast('This encrypted session history cannot be unlocked with a passphrase.', 'warning', 4200);
+          return;
+        }
+        state.secureStorage.showUnlockModal = true;
+        state.secureStorage.modalError = '';
+        renderSecureStorageModal();
+        window.setTimeout(() => {
+          if (refs.secureStoragePassphraseInput) refs.secureStoragePassphraseInput.focus();
+        }, 0);
+      }
+
+      function closeSecureStorageModal() {
+        if (isSessionUiLocked()) return;
+        state.secureStorage.showUnlockModal = false;
+        state.secureStorage.modalError = '';
+        if (refs.secureStoragePassphraseInput) refs.secureStoragePassphraseInput.value = '';
+        renderSecureStorageModal();
+      }
+
+      function renderSecureStorageModal() {
+        if (!refs.secureStorageModal) return;
+        const lockScreenVisible = isSessionUiLocked();
+        const passphraseMode = canPromptForSecureStoragePassphrase();
+        const hasLockedPayload = hasLockedSessionEnvelope();
+        const isVisible = lockScreenVisible || state.secureStorage.showUnlockModal;
+        refs.secureStorageModal.classList.toggle('hidden', !isVisible);
+        refs.closeSecureStorageModalBtn.classList.toggle('hidden', lockScreenVisible);
+        refs.secureStorageCancelBtn.classList.toggle('hidden', lockScreenVisible);
+        refs.secureStorageModalTitle.textContent = lockScreenVisible ? 'Session locked' : (hasLockedPayload ? 'Unlock encrypted session history' : 'Unlock secure local storage');
+        if (lockScreenVisible) {
+          refs.secureStorageModalCopy.textContent = passphraseMode
+            ? 'Sensitive consultation content is hidden while the app is locked. Enter the passphrase to continue.'
+            : (hasLockedPayload
+              ? 'This app is locked and the previous encrypted session history cannot be reopened because the session-only key is no longer in memory.'
+              : 'Sensitive consultation content is hidden while the app is locked. Use the in-memory session key to unlock this tab.');
+        } else {
+          refs.secureStorageModalCopy.textContent = hasLockedPayload
+            ? 'Enter the passphrase used when session history was encrypted in this browser.'
+            : 'Enter a passphrase to keep secure local storage unlocked in this tab. It will not be stored by this app.';
+        }
+        refs.secureStoragePassphraseField.classList.toggle('hidden', !passphraseMode);
+        refs.unlockSecureStorageBtn.disabled = passphraseMode ? false : !canUnlockCurrentSession();
+        refs.unlockSecureStorageBtn.textContent = passphraseMode
+          ? (hasLockedPayload ? 'Unlock session history' : 'Unlock secure local storage')
+          : (canUnlockCurrentSession() ? 'Unlock this tab' : 'Unavailable after refresh');
+        const overlayMessage = lockScreenVisible
+          ? [state.secureStorage.modalError, getSessionLockReasonMessage()].filter(Boolean).join(' ')
+          : state.secureStorage.modalError;
+        renderSupportBanner(refs.secureStorageModalError, overlayMessage);
+      }
+
+      async function unlockSecureStorageWithPassphrase(passphrase) {
+        const normalizedPassphrase = String(passphrase || '');
+        if (!normalizedPassphrase) throw new Error('Enter a passphrase to continue.');
+        const envelope = state.secureStorage.lockedEnvelope;
+        const storedEnvelope = !envelope && isEncryptedSessionEnvelope(readStorage(STORAGE_KEYS.sessions, null)) ? readStorage(STORAGE_KEYS.sessions, null) : null;
+        const saltBytes = envelope && envelope.salt ? base64ToUint8Array(envelope.salt) : getRandomBytes(SESSION_STORAGE_SALT_BYTES);
+        const key = await deriveKeyFromPassphrase(normalizedPassphrase, saltBytes);
+
+        if (envelope) {
+          const decryptedSessions = await decryptJsonValue(envelope, normalizedPassphrase);
+          if (!Array.isArray(decryptedSessions)) throw new Error('Encrypted session history could not be decoded.');
+          state.sessions = mergeSessionCollections(normaliseSessionCollection(decryptedSessions), state.sessions);
+          state.secureStorage.lockedEnvelope = null;
+        } else if (storedEnvelope) {
+          await decryptJsonValue(storedEnvelope, normalizedPassphrase);
+        }
+
+        markSecureStorageUnlocked(key, normalizedPassphrase);
+        unlockSessionUi();
+        if (!isSessionUiLocked()) closeSecureStorageModal();
+        showToast(envelope ? 'Encrypted session history unlocked.' : 'Secure local storage unlocked for this tab.', 'success', 2400);
+      }
+
+      async function unlockCurrentSession() {
+        if (canPromptForSecureStoragePassphrase()) {
+          await unlockSecureStorageWithPassphrase(refs.secureStoragePassphraseInput.value);
+          return;
+        }
+        if (!canUnlockCurrentSession()) throw new Error('This session cannot be unlocked in the current browser tab.');
+        if (!state.secureStorage.unlocked && state.settings.secureStorageEnabled && state.settings.secureStorageMode === 'session' && !isCryptoKeyLike(state.secureStorage.key)) {
+          const key = await ensureRuntimeSessionKey();
+          markSecureStorageUnlocked(key);
+        }
+        unlockSessionUi();
+        showToast('Session unlocked for this tab.', 'success', 2200);
       }
 
       async function getPromptApiAvailability() {
@@ -1680,6 +2438,13 @@
       }
 
       function renderConsultationSummary() {
+        if (isSessionUiLocked()) {
+          refs.consultationSummaryCard.classList.remove('hidden');
+          refs.consultationSummaryMeta.textContent = 'Unlock the app to view or generate AI summaries for this session.';
+          refs.consultationSummary.innerHTML = renderLockedPlaceholder(getSessionLockPlaceholderText('summary output'));
+          refs.generateSummaryBtn.disabled = true;
+          return;
+        }
         const session = state.activeSession;
         const canShow = canGenerateDocumentsForSession(session);
         refs.consultationSummaryCard.classList.toggle('hidden', !canShow);
@@ -1862,6 +2627,15 @@
       }
 
       function renderConsultationDocuments() {
+        if (isSessionUiLocked()) {
+          refs.documentGenerationCard.classList.remove('hidden');
+          refs.consultationDocumentType.innerHTML = '';
+          refs.consultationDocumentsList.innerHTML = renderLockedPlaceholder(getSessionLockPlaceholderText('generated documents'));
+          refs.documentCardMeta.textContent = 'Unlock the app to review or generate session documents.';
+          updateDocumentGenerateButton(refs.generateDocumentBtn, false, false);
+          refs.openDocumentsTabBtn.disabled = true;
+          return;
+        }
         const session = state.activeSession;
         const canShow = canGenerateDocumentsForSession(session);
         const isBusy = isDocumentGenerationBusy();
@@ -1896,6 +2670,20 @@
       }
 
       function renderDocumentsTab() {
+        if (isSessionUiLocked()) {
+          refs.documentsTabBtn.classList.toggle('hidden', false);
+          refs.documentsTemplateSelect.innerHTML = '';
+          updateDocumentGenerateButton(refs.documentsGenerateBtn, false, false);
+          refs.copyDocumentTextBtn.disabled = true;
+          refs.downloadDocumentBtn.disabled = true;
+          refs.documentsMetaText.textContent = 'Unlock the app to review or generate session documents.';
+          refs.documentsList.innerHTML = renderLockedPlaceholder(getSessionLockPlaceholderText('document drafts'));
+          refs.documentDetailTitle.textContent = 'Document preview';
+          refs.documentDetailMeta.textContent = 'Sensitive document content is hidden while the app is locked.';
+          refs.documentPreview.innerHTML = '<div class="document-preview-empty">' + escapeHtml(getSessionLockPlaceholderText('document content')) + '</div>';
+          refs.documentPreview.removeAttribute('contenteditable');
+          return;
+        }
         const session = getDocumentTargetSession();
         const canShow = canGenerateDocumentsForSession(session);
         const isBusy = isDocumentGenerationBusy();
@@ -2117,7 +2905,7 @@
       function createSessionFromConsultation(status = 'stopped') {
         const now = Date.now();
         const formValues = readConsultationForm();
-        const session = createSession({ patientName: formValues.patientName, clinicianName: formValues.clinicianName, consultationType: formValues.consultationType, manualNotes: formValues.manualNotes, tags: formValues.tags.slice(), status, startedAt: now, createdAt: now, updatedAt: now, elapsedMs: 0, lastStartedSegmentAt: null, stoppedAt: status === 'stopped' ? now : null });
+        const session = createSession({ patientName: formValues.patientName, clinicianName: formValues.clinicianName, consultationType: formValues.consultationType, manualNotes: formValues.manualNotes, tags: formValues.tags.slice(), status, startedAt: now, createdAt: now, updatedAt: now, elapsedMs: 0, lastStartedSegmentAt: null, stoppedAt: status === 'stopped' ? now : null, ephemeral: Boolean(state.settings.ephemeralConsultationMode) });
         state.activeSession = session;
         state.selectedDocumentId = null;
         state.consultationDraftTags = formValues.tags.slice();
@@ -2147,10 +2935,37 @@
       }
 
       function renderLastSavedLabel() {
+        if (state.secureStorage.persistWarning) {
+          refs.lastSavedLabel.textContent = state.secureStorage.persistWarning;
+          return;
+        }
+        if (state.activeSession && isEphemeralSession(state.activeSession)) {
+          refs.lastSavedLabel.textContent = 'Ephemeral consultation kept in memory only';
+          return;
+        }
         refs.lastSavedLabel.textContent = state.lastPersistedAt ? ('Last saved ' + formatDateTime(state.lastPersistedAt)) : 'Not yet saved';
       }
 
+      function getConsultationPrivacyMessage() {
+        if (isSessionUiLocked()) return getSessionLockReasonMessage();
+        if (state.activeSession && isEphemeralSession(state.activeSession)) {
+          return 'This consultation is in ephemeral mode. It stays in memory for this tab only unless you choose to save it to local storage.';
+        }
+        if (state.settings.ephemeralConsultationMode) {
+          return 'New consultations start in ephemeral mode and are not written to local storage unless you explicitly save them.';
+        }
+        if (state.settings.purgeOnBrowserClose) {
+          return 'Saved consultation history will be purged from this browser when the tab is closed, if the browser allows unload cleanup.';
+        }
+        return '';
+      }
+
+      function renderConsultationPrivacyMessage() {
+        renderSupportBanner(refs.consultationPrivacyMessage, getConsultationPrivacyMessage());
+      }
+
       function renderConsultationSummaryLabel() {
+        if (isSessionUiLocked()) { refs.sessionSummaryLabel.textContent = 'Session locked'; return; }
         const session = state.activeSession;
         if (!session) { refs.sessionSummaryLabel.textContent = 'No active session'; return; }
         const tagText = session.tags && session.tags.length ? (' • Tags: ' + session.tags.join(', ')) : '';
@@ -2170,21 +2985,44 @@
       function renderTimer() { refs.sessionTimer.textContent = formatDuration(getSessionElapsedMs(state.activeSession)); }
 
       function updateStatusPill() {
+        if (isSessionUiLocked()) {
+          refs.statusPill.className = 'status-pill paused';
+          refs.statusPill.textContent = 'Locked';
+          return;
+        }
         const status = state.activeSession ? state.activeSession.status : 'idle';
         refs.statusPill.className = 'status-pill ' + status;
         refs.statusPill.textContent = titleCaseStatus(status);
       }
 
       function refreshControlStates() {
+        if (isSessionUiLocked()) {
+          refs.startBtn.disabled = true;
+          refs.pauseBtn.disabled = true;
+          refs.resumeBtn.disabled = true;
+          refs.stopBtn.disabled = true;
+          refs.markImportantBtn.disabled = true;
+          refs.saveSessionBtn.disabled = true;
+          refs.copyTranscriptBtn.disabled = true;
+          refs.exportTranscriptBtn.disabled = true;
+          return;
+        }
         const status = state.activeSession ? state.activeSession.status : 'idle';
         refs.startBtn.disabled = !state.supportsSpeech || status === 'listening';
         refs.pauseBtn.disabled = status !== 'listening';
         refs.resumeBtn.disabled = !state.supportsSpeech || status !== 'paused';
         refs.stopBtn.disabled = !(status === 'listening' || status === 'paused');
         refs.markImportantBtn.disabled = !state.activeSession;
+        refs.saveSessionBtn.disabled = false;
+        refs.copyTranscriptBtn.disabled = false;
+        refs.exportTranscriptBtn.disabled = false;
       }
 
       function renderSessionHint() {
+        if (isSessionUiLocked()) {
+          refs.transcriptEditHint.textContent = 'Unlock the app to view or edit transcript content.';
+          return;
+        }
         const session = state.activeSession;
         const hasSearch = Boolean((state.transcriptSearch || '').trim());
         if (!session) { refs.transcriptEditHint.textContent = 'Start listening to begin transcription, or save a note-only session at any time.'; return; }
@@ -2207,6 +3045,10 @@
       }
 
       function renderActiveSessionStateText() {
+        if (isSessionUiLocked()) {
+          refs.activeSessionStateText.textContent = 'Sensitive consultation content is hidden until the app is unlocked.';
+          return;
+        }
         const session = state.activeSession;
         if (!session) { refs.activeSessionStateText.textContent = 'No active session. Manual notes can still be captured and saved.'; return; }
         refs.activeSessionStateText.textContent = 'Auto-save every ' + state.settings.autoSaveInterval + 's • ' + titleCaseStatus(session.status) + ' • Started ' + formatDateTime(session.startedAt);
@@ -2220,7 +3062,7 @@
         renderLastSavedLabel();
         renderConsultationSummaryLabel();
         refreshControlStates();
-        refs.downloadFhirBtn.disabled = !state.activeSession;
+        refs.downloadFhirBtn.disabled = isSessionUiLocked() || !state.activeSession;
       }
 
       function renderMacroBar() {
@@ -2319,6 +3161,11 @@
       }
 
       function renderConsultationTranscript() {
+        if (isSessionUiLocked()) {
+          refs.transcriptContainer.innerHTML = renderLockedPlaceholder(getSessionLockPlaceholderText('transcript'));
+          renderInterim();
+          return;
+        }
         const session = state.activeSession;
         if (!session) {
           refs.transcriptContainer.innerHTML = '<div class="empty-state">Start listening to populate the live transcript. Important markers and transcript edits appear here.</div>';
@@ -2330,7 +3177,36 @@
       }
 
       function renderConsultation() {
+        if (isSessionUiLocked()) {
+          refs.patientName.value = '';
+          refs.clinicianName.value = '';
+          refs.consultationType.value = '';
+          refs.manualNotes.value = '';
+          refs.transcriptSearch.value = '';
+          refs.patientName.disabled = true;
+          refs.clinicianName.disabled = true;
+          refs.consultationType.disabled = true;
+          refs.manualNotes.disabled = true;
+          refs.transcriptSearch.disabled = true;
+          refs.macroBar.innerHTML = '<span class="subtle-note">Unlock the app to access snippets.</span>';
+          refs.tagSelector.innerHTML = '<span class="subtle-note">Unlock the app to access session tags.</span>';
+          renderSpeechSupportBanner();
+          renderConsultationPrivacyMessage();
+          renderConsultationChrome();
+          renderConsultationSummary();
+          renderConsultationDocuments();
+          renderConsultationTranscript();
+          renderDocumentsTab();
+          return;
+        }
+        refs.patientName.disabled = false;
+        refs.clinicianName.disabled = false;
+        refs.consultationType.disabled = false;
+        refs.manualNotes.disabled = false;
+        refs.transcriptSearch.disabled = false;
+        if (state.activeSession) populateConsultationForm(state.activeSession);
         renderSpeechSupportBanner();
+        renderConsultationPrivacyMessage();
         renderMacroBar();
         renderConsultationTagSelector();
         renderConsultationChrome();
@@ -2354,10 +3230,15 @@
       }
 
       function renderHistoryList() {
+        if (isSessionUiLocked()) {
+          refs.historyCount.textContent = 'Locked';
+          refs.sessionList.innerHTML = '<div class="empty-state">' + escapeHtml(getSessionLockPlaceholderText('session history')) + '</div>';
+          return;
+        }
         const sessions = getFilteredSessions();
         refs.historyCount.textContent = sessions.length === state.sessions.length ? String(sessions.length) : (String(sessions.length) + ' / ' + String(state.sessions.length));
         if (!sessions.length) {
-          refs.sessionList.innerHTML = '<div class="empty-state">No sessions match the current history filters.</div>';
+          refs.sessionList.innerHTML = '<div class="empty-state">' + escapeHtml(hasLockedSessionEnvelope() ? 'Encrypted session history is locked. Unlock it from Settings to review saved consultations.' : 'No sessions match the current history filters.') + '</div>';
           return;
         }
         refs.sessionList.innerHTML = sessions.map((session) => {
@@ -2467,6 +3348,15 @@
       }
 
       function renderHistoryDetail() {
+        if (isSessionUiLocked()) {
+          refs.historyEditToggle.disabled = true;
+          refs.historySaveBtn.disabled = true;
+          refs.historyDownloadFhirBtn.disabled = true;
+          refs.historyDetailHint.textContent = 'Unlock the app to review transcript, notes, metadata, and documents.';
+          refs.historyEditToggle.textContent = 'Edit Mode';
+          refs.historyDetail.innerHTML = '<div class="empty-state">' + escapeHtml(getSessionLockPlaceholderText('session details')) + '</div>';
+          return;
+        }
         const session = getSelectedHistorySession();
         refs.historyEditToggle.disabled = !session;
         refs.historySaveBtn.disabled = !session;
@@ -2474,7 +3364,7 @@
         refs.historyDetailHint.textContent = session ? 'Review transcript, notes, metadata, and tags for the selected session.' : 'Select a session to review transcript and notes.';
         refs.historyEditToggle.textContent = state.historyEditMode ? 'Read Mode' : 'Edit Mode';
         if (!session) {
-          refs.historyDetail.innerHTML = '<div class="empty-state">Select a session from the list to open its transcript and notes.</div>';
+          refs.historyDetail.innerHTML = '<div class="empty-state">' + escapeHtml(hasLockedSessionEnvelope() ? 'Saved session history is currently locked, so detail view is unavailable until it is unlocked.' : 'Select a session from the list to open its transcript and notes.') + '</div>';
           return;
         }
         const editable = state.historyEditMode;
@@ -2523,6 +3413,7 @@
       }
 
       function renderHistory() {
+        renderSupportBanner(refs.historySecurityMessage, getSecureStorageWarningMessage());
         renderHistoryList();
         renderHistoryDetail();
       }
@@ -2546,10 +3437,15 @@
         refs.settingAutoPunctuation.checked = Boolean(state.settings.autoPunctuation);
         refs.settingInterimResults.checked = Boolean(state.settings.interimResults);
         refs.settingSaveRawTranscript.checked = Boolean(state.settings.saveRawTranscript);
+        refs.settingSecureStorageEnabled.checked = Boolean(state.settings.secureStorageEnabled);
+        refs.settingSecureStorageMode.value = state.settings.secureStorageMode;
+        refs.settingAutoLockMinutes.value = String(state.settings.autoLockMinutes);
         refs.settingAutoSaveInterval.value = String(state.settings.autoSaveInterval);
         refs.settingAutoSaveIntervalValue.textContent = state.settings.autoSaveInterval + 's';
         refs.settingTheme.value = state.settings.theme;
         refs.settingDataRetentionDays.value = String(state.settings.dataRetentionDays);
+        refs.settingPurgeOnBrowserClose.checked = Boolean(state.settings.purgeOnBrowserClose);
+        refs.settingEphemeralConsultationMode.checked = Boolean(state.settings.ephemeralConsultationMode);
         refs.settingTranscriptFontSize.value = String(state.settings.transcriptFontSize);
         refs.settingTranscriptFontSizeValue.textContent = state.settings.transcriptFontSize + 'px';
         refs.settingLineSpacing.value = String(state.settings.transcriptLineSpacing);
@@ -2560,6 +3456,17 @@
             ? 'Prompt API is available through the browser. Summaries run on-device with no API key.'
             : 'Prompt API is unavailable, but the Summarizer API is available as a fallback.')
           : 'Prompt API and Summarizer API are unavailable in this browser, so summary generation is unavailable here.';
+        refs.settingSecureStorageEnabled.disabled = hasLockedSessionEnvelope();
+        refs.settingSecureStorageMode.disabled = hasLockedSessionEnvelope() || !state.settings.secureStorageEnabled;
+        refs.settingAutoLockMinutes.disabled = hasLockedSessionEnvelope() || !state.settings.secureStorageEnabled;
+        refs.settingSecureStorageStatus.textContent = getSecureStorageStatusText();
+        refs.settingSecureStorageStatus.classList.toggle('warning', Boolean(getSecureStorageWarningMessage()));
+        refs.settingSecureStorageHelp.textContent = getSecureStorageHelpText();
+        refs.openSecureStorageModalBtn.textContent = isSessionUiLocked() ? 'Unlock app' : (hasLockedSessionEnvelope() ? 'Unlock session history' : 'Unlock secure local storage');
+        refs.openSecureStorageModalBtn.disabled = (!canPromptForSecureStoragePassphrase() && !isSessionUiLocked()) || (!state.settings.secureStorageEnabled && !hasLockedSessionEnvelope());
+        refs.lockSecureStorageBtn.disabled = !state.settings.secureStorageEnabled || isSessionUiLocked();
+        renderSupportBanner(refs.settingsSecurityMessage, getSecureStorageWarningMessage());
+        renderSecureStorageModal();
       }
 
       function renderMacroEditor() {
@@ -2597,6 +3504,97 @@
         renderConsultationTagSelector();
       }
 
+      async function handleSecureStorageToggleChange(enabled) {
+        if (hasLockedSessionEnvelope()) {
+          refs.settingSecureStorageEnabled.checked = true;
+          showToast('Unlock the existing encrypted session history before changing secure storage settings.', 'warning', 4200);
+          renderSettingsForm();
+          return;
+        }
+
+        if (enabled) {
+          if (!isWebCryptoAvailable()) {
+            state.settings.secureStorageEnabled = false;
+            saveSettings();
+            renderSettingsForm();
+            showToast('Web Crypto API is unavailable in this browser, so secure local storage cannot be enabled here.', 'error', 4200);
+            return;
+          }
+
+          state.settings.secureStorageEnabled = true;
+          if (state.settings.secureStorageMode === 'session') {
+            try {
+              await ensureRuntimeSessionKey();
+            } catch (error) {
+              state.settings.secureStorageEnabled = false;
+              saveSettings();
+              renderSettingsForm();
+              showToast(normaliseWhitespace(error && error.message ? error.message : String(error || 'Unable to enable secure local storage.')), 'error', 4200);
+              return;
+            }
+          } else {
+            clearSecureStorageAccess();
+          }
+
+          saveSettings();
+          applySettingsChange();
+          state.sessionLock.isLocked = false;
+
+          if (state.settings.secureStorageMode === 'passphrase') {
+            openSecureStorageModal();
+            showToast('Enter a passphrase to unlock secure local storage for this tab.', 'info', 3200);
+            return;
+          }
+
+          await persistSessions();
+          showToast('Secure local storage enabled.', 'success', 2400);
+          return;
+        }
+
+        state.settings.secureStorageEnabled = false;
+        state.sessionLock.isLocked = false;
+        state.sessionLock.lockedReason = null;
+        clearSecureStorageAccess();
+        saveSettings();
+        applySettingsChange();
+        await persistSessions();
+        showToast('Secure local storage disabled. Future saves use standard local storage.', 'warning', 3200);
+      }
+
+      async function handleSecureStorageModeChange(nextMode) {
+        if (hasLockedSessionEnvelope()) {
+          renderSettingsForm();
+          showToast('Unlock the existing encrypted session history before changing unlock mode.', 'warning', 4200);
+          return;
+        }
+
+        state.settings.secureStorageMode = nextMode === 'session' ? 'session' : 'passphrase';
+        clearSecureStorageAccess();
+        saveSettings();
+        applySettingsChange();
+
+        if (!state.settings.secureStorageEnabled) return;
+
+        if (state.settings.secureStorageMode === 'session') {
+          try {
+            await ensureRuntimeSessionKey();
+            await persistSessions();
+            renderSettingsForm();
+            showToast('Secure local storage now uses a session-only key for this tab.', 'success', 2400);
+          } catch (error) {
+            showToast(normaliseWhitespace(error && error.message ? error.message : String(error || 'Unable to switch secure storage mode.')), 'error', 4200);
+          }
+          return;
+        }
+
+        openSecureStorageModal();
+        showToast('Enter a passphrase to continue using secure local storage.', 'info', 3200);
+      }
+
+      function lockSecureStorageNow(showFeedback = true) {
+        lockSessionUi('manual', { showFeedback });
+      }
+
       function resetAutoSaveInterval() {
         window.clearInterval(state.autoSaveIntervalId);
         state.autoSaveIntervalId = window.setInterval(() => {
@@ -2617,8 +3615,9 @@
         renderConsultationDocuments();
         renderConsultationTranscript();
         renderDocumentsTab();
-        renderHistoryDetail();
+        renderHistory();
         resetAutoSaveInterval();
+        armSecureStorageAutoLockTimer();
         if (!state.settings.interimResults) state.interimText = '';
         renderInterim();
         if (state.speechProvider) state.speechProvider.applyConfig();
@@ -2627,14 +3626,10 @@
       function handleRetentionUpdate() {
         const removedCount = purgeOldSessions();
         if (removedCount > 0) {
-          if (state.activeSession && !state.sessions.find((session) => session.id === state.activeSession.id)) {
-            state.activeSession = null;
-            resetConsultationDraft();
-          }
-          if (state.historySelectedSessionId && !state.sessions.find((session) => session.id === state.historySelectedSessionId)) state.historySelectedSessionId = null;
           persistSessions();
           renderConsultation();
           renderHistory();
+          renderDocumentsTab();
           showToast('Removed ' + removedCount + ' session' + (removedCount === 1 ? '' : 's') + ' due to data retention settings.', 'warning', 4200);
         }
       }
@@ -2784,7 +3779,7 @@
         persistSessionsDebounced();
       }
 
-      function saveSessionImmediately(showFeedback = true) {
+      async function saveSessionImmediately(showFeedback = true) {
         let session = state.activeSession;
         if (!session) session = createSessionFromConsultation('stopped');
         else {
@@ -2793,9 +3788,20 @@
           session.updatedAt = Date.now();
           upsertSession(session);
         }
-        persistSessions();
+        if (session && isEphemeralSession(session)) {
+          const shouldPersist = window.confirm('This consultation is currently ephemeral and only kept in memory for this tab. Save it to local browser storage now?');
+          if (!shouldPersist) {
+            renderConsultation();
+            if (showFeedback) showToast('Ephemeral consultation kept in memory only.', 'info', 2800);
+            return;
+          }
+          session.ephemeral = false;
+          session.updatedAt = Date.now();
+          upsertSession(session);
+        }
+        const didPersist = await persistSessions();
         renderConsultation();
-        if (showFeedback) showToast('Session saved locally.', 'success');
+        if (showFeedback && didPersist) showToast('Session saved locally.', 'success');
       }
 
       function copyCurrentTranscript() {
@@ -2818,7 +3824,7 @@
         renderHistoryDetail();
       }
 
-      function duplicateSession(sessionId) {
+      async function duplicateSession(sessionId) {
         const original = findSession(sessionId);
         if (!original) return;
         const now = Date.now();
@@ -2834,24 +3840,24 @@
         upsertSession(duplicated);
         state.historySelectedSessionId = duplicated.id;
         state.historyEditMode = false;
-        persistSessions();
+        const didPersist = await persistSessions();
         renderHistory();
-        showToast('Session duplicated.', 'success');
+        if (didPersist) showToast('Session duplicated.', 'success');
       }
 
-      function toggleArchiveSession(sessionId) {
+      async function toggleArchiveSession(sessionId) {
         const session = findSession(sessionId);
         if (!session) return;
         session.archived = !session.archived;
         session.archivedAt = session.archived ? Date.now() : null;
         session.updatedAt = Date.now();
         upsertSession(session);
-        persistSessions();
+        const didPersist = await persistSessions();
         renderHistory();
-        showToast(session.archived ? 'Session archived.' : 'Session restored.', 'success');
+        if (didPersist) showToast(session.archived ? 'Session archived.' : 'Session restored.', 'success');
       }
 
-      function deleteSession(sessionId) {
+      async function deleteSession(sessionId) {
         const session = findSession(sessionId);
         if (!session) return;
         if (!window.confirm('Permanently delete ' + (session.patientName || 'this session') + '? This cannot be undone.')) return;
@@ -2859,14 +3865,12 @@
           if (state.speechProvider) state.speechProvider.stop();
           stopTimer();
           state.interimText = '';
-          resetConsultationDraft();
         }
-        state.sessions = state.sessions.filter((item) => item.id !== sessionId);
-        if (state.historySelectedSessionId === sessionId) { state.historySelectedSessionId = null; state.historyEditMode = false; }
-        persistSessions();
+        const didPersist = (await removeSessionsByPredicate((item) => item.id === sessionId)).didPersist;
         renderConsultation();
         renderHistory();
-        showToast('Session deleted permanently.', 'success');
+        renderDocumentsTab();
+        if (didPersist) showToast('Session deleted permanently.', 'success');
       }
 
       function replaceTagAcrossSessions(oldTag, newTag) {
@@ -2912,7 +3916,7 @@
         refs.resumeBtn.addEventListener('click', resumeListening);
         refs.stopBtn.addEventListener('click', stopListening);
         refs.markImportantBtn.addEventListener('click', markImportantMoment);
-        refs.saveSessionBtn.addEventListener('click', () => saveSessionImmediately(true));
+        refs.saveSessionBtn.addEventListener('click', async () => { await saveSessionImmediately(true); });
         refs.generateSummaryBtn.addEventListener('click', async () => {
           if (!state.activeSession) return;
           await generateSessionSummary(state.activeSession.id, { force: true });
@@ -3048,14 +4052,31 @@
         refs.historyDateFilter.addEventListener('change', () => renderHistory());
         refs.historyHideArchived.addEventListener('change', () => renderHistory());
         refs.historyEditToggle.addEventListener('click', () => { if (!getSelectedHistorySession()) return; state.historyEditMode = !state.historyEditMode; renderHistoryDetail(); });
-        refs.historySaveBtn.addEventListener('click', () => { if (!getSelectedHistorySession()) return; persistSessions(); showToast('History changes saved.', 'success'); });
+        refs.historySaveBtn.addEventListener('click', async () => {
+          if (!getSelectedHistorySession()) return;
+          const didPersist = await persistSessions();
+          if (didPersist) showToast('History changes saved.', 'success');
+        });
         refs.settingLocale.addEventListener('change', () => { state.settings.locale = refs.settingLocale.value; applySettingsChange(); });
         refs.settingAutoPunctuation.addEventListener('change', () => { state.settings.autoPunctuation = refs.settingAutoPunctuation.checked; applySettingsChange(); });
         refs.settingInterimResults.addEventListener('change', () => { state.settings.interimResults = refs.settingInterimResults.checked; applySettingsChange(); });
         refs.settingSaveRawTranscript.addEventListener('change', () => { state.settings.saveRawTranscript = refs.settingSaveRawTranscript.checked; applySettingsChange(); });
+        refs.settingSecureStorageEnabled.addEventListener('change', async () => { await handleSecureStorageToggleChange(refs.settingSecureStorageEnabled.checked); });
+        refs.settingSecureStorageMode.addEventListener('change', async () => { await handleSecureStorageModeChange(refs.settingSecureStorageMode.value); });
+        refs.settingAutoLockMinutes.addEventListener('input', () => {
+          state.settings.autoLockMinutes = clamp(Number(refs.settingAutoLockMinutes.value) || 0, 0, 240);
+          saveSettings();
+          renderSettingsForm();
+          armSecureStorageAutoLockTimer();
+        });
         refs.settingAutoSaveInterval.addEventListener('input', () => { state.settings.autoSaveInterval = clamp(Number(refs.settingAutoSaveInterval.value) || 5, 1, 30); applySettingsChange(); });
         refs.settingTheme.addEventListener('change', () => { state.settings.theme = refs.settingTheme.value === 'dark' ? 'dark' : 'light'; applySettingsChange(); });
         refs.settingDataRetentionDays.addEventListener('input', () => { state.settings.dataRetentionDays = Math.max(0, Number(refs.settingDataRetentionDays.value) || 0); saveSettings(); renderSettingsForm(); handleRetentionUpdate(); });
+        refs.settingPurgeOnBrowserClose.addEventListener('change', () => { state.settings.purgeOnBrowserClose = refs.settingPurgeOnBrowserClose.checked; applySettingsChange(); });
+        refs.settingEphemeralConsultationMode.addEventListener('change', () => { state.settings.ephemeralConsultationMode = refs.settingEphemeralConsultationMode.checked; applySettingsChange(); });
+        refs.purgeOldSessionsNowBtn.addEventListener('click', async () => { await purgeSessionsOlderThanRetentionNow(); });
+        refs.deleteArchivedSessionsBtn.addEventListener('click', async () => { await deleteArchivedSessionsNow(); });
+        refs.deleteAllSessionsBtn.addEventListener('click', () => { deleteAllSessionsNow(); });
         refs.settingTranscriptFontSize.addEventListener('input', () => { state.settings.transcriptFontSize = clamp(Number(refs.settingTranscriptFontSize.value) || 16, 14, 24); applySettingsChange(); });
         refs.settingLineSpacing.addEventListener('input', () => { state.settings.transcriptLineSpacing = clamp(Number(refs.settingLineSpacing.value) || 1.55, 1.2, 2); applySettingsChange(); });
         refs.settingSummaryPrompt.addEventListener('input', debounce(() => {
@@ -3080,9 +4101,41 @@
         refs.continueFromSplashBtn.addEventListener('click', () => { saveSplashProfileAndContinue(); });
         refs.openApiHelpBtn.addEventListener('click', () => { openApiHelpModal(); });
         refs.closeApiHelpBtn.addEventListener('click', () => { closeApiHelpModal(); });
+        refs.openSecureStorageModalBtn.addEventListener('click', () => { openSecureStorageModal(); });
+        refs.lockSecureStorageBtn.addEventListener('click', () => { lockSecureStorageNow(true); });
+        refs.closeSecureStorageModalBtn.addEventListener('click', () => { closeSecureStorageModal(); });
+        refs.secureStorageCancelBtn.addEventListener('click', () => { closeSecureStorageModal(); });
+        refs.unlockSecureStorageBtn.addEventListener('click', async () => {
+          try {
+            await unlockCurrentSession();
+            if (state.settings.secureStorageEnabled) await persistSessions();
+          } catch (error) {
+            state.secureStorage.modalError = normaliseWhitespace(error && error.message ? error.message : String(error || 'Unable to unlock encrypted session history.'));
+            renderSecureStorageModal();
+          }
+        });
+        refs.secureStoragePassphraseInput.addEventListener('keydown', async (event) => {
+          if (event.key !== 'Enter') return;
+          event.preventDefault();
+          refs.unlockSecureStorageBtn.click();
+        });
         refs.reopenSplashBtn.addEventListener('click', () => { openSplashScreen(); });
         refs.apiHelpModal.addEventListener('click', (event) => {
           if (event.target === refs.apiHelpModal) closeApiHelpModal();
+        });
+        refs.secureStorageModal.addEventListener('click', (event) => {
+          if (event.target === refs.secureStorageModal) closeSecureStorageModal();
+        });
+        refs.closeDestructiveConfirmBtn.addEventListener('click', () => { closeDestructiveConfirmModal(); });
+        refs.cancelDestructiveConfirmBtn.addEventListener('click', () => { closeDestructiveConfirmModal(); });
+        refs.confirmDestructiveActionBtn.addEventListener('click', async () => { await executeDestructiveConfirmAction(); });
+        refs.destructiveConfirmInput.addEventListener('keydown', async (event) => {
+          if (event.key !== 'Enter') return;
+          event.preventDefault();
+          await executeDestructiveConfirmAction();
+        });
+        refs.destructiveConfirmModal.addEventListener('click', (event) => {
+          if (event.target === refs.destructiveConfirmModal) closeDestructiveConfirmModal();
         });
         refs.splashOverlay.addEventListener('click', (event) => {
           if (event.target === refs.splashOverlay && state.settings.splashDismissedAt) closeSplashScreen();
@@ -3209,8 +4262,27 @@
             showToast('Document template deleted.', 'success');
           }
         });
-        window.addEventListener('beforeunload', () => { if (state.activeSession) { syncActiveSessionFromForm(); persistSessions(); } });
-        document.addEventListener('visibilitychange', () => { if (document.hidden && state.activeSession) { syncActiveSessionFromForm(); persistSessions(); } });
+        ['pointerdown', 'touchstart', 'mousedown'].forEach((eventName) => {
+          document.addEventListener(eventName, () => { recordSessionActivity(); }, { passive: true });
+        });
+        document.addEventListener('keydown', () => { recordSessionActivity(); });
+        window.addEventListener('beforeunload', () => {
+          if (state.activeSession) syncActiveSessionFromForm();
+          if (state.settings.purgeOnBrowserClose) {
+            clearSessionStorageBestEffort();
+            return;
+          }
+          if (state.activeSession || state.sessions.some((session) => isEphemeralSession(session))) persistSessions();
+        });
+        window.addEventListener('pagehide', () => {
+          if (!state.settings.purgeOnBrowserClose) return;
+          clearSessionStorageBestEffort();
+        });
+        document.addEventListener('visibilitychange', () => {
+          if (document.hidden && state.activeSession) { syncActiveSessionFromForm(); persistSessions(); }
+          if (!document.hidden) recordSessionActivity();
+          else armSecureStorageAutoLockTimer();
+        });
       }
 
       function initialiseSpeechProvider() {
@@ -3247,14 +4319,23 @@
         } else {
           resetConsultationDraft();
         }
+        state.sessionLock.unlockMode = getEffectiveSecureStorageMode();
+        state.sessionLock.lastActivityAt = Date.now();
+        if (state.settings.secureStorageEnabled && (hasLockedSessionEnvelope() || state.sessions.length || state.activeSession)) {
+          state.sessionLock.isLocked = true;
+          state.sessionLock.lockedReason = hasLockedSessionEnvelope()
+            ? (state.secureStorage.lockedEnvelope.mode === 'session' ? 'session-key-unavailable' : 'passphrase-required')
+            : 'startup';
+        }
         state.showSplash = !state.settings.splashDismissedAt;
       }
 
-      function init() {
+      async function init() {
         applyThemeAndBranding();
         initialiseSpeechProvider();
+        await loadSessions();
         const removedCount = purgeOldSessions();
-        if (removedCount > 0) persistSessions();
+        if (removedCount > 0) await persistSessions();
         initialiseStateFromStorage();
         renderSettingsForm();
         renderCustomisationForm();
@@ -3262,10 +4343,13 @@
         renderHistory();
         resetAutoSaveInterval();
         attachEventListeners();
+        renderDestructiveConfirmModal();
+        renderSecureStorageModal();
         renderSplashScreen();
         refreshApiCapabilityChecks();
         if (state.activeSession && state.activeSession.status === 'listening' && state.activeSession.lastStartedSegmentAt) ensureTimerRunning();
         if (removedCount > 0) showToast('Removed ' + removedCount + ' old session' + (removedCount === 1 ? '' : 's') + ' based on retention settings.', 'warning', 4200);
+        if (hasLockedSessionEnvelope()) showToast(getLockedSessionPersistMessage(), 'warning', 5200);
       }
 
       window.__scribeDebugCapabilities = async function () {
@@ -3278,5 +4362,8 @@
         };
       };
 
-      init();
+      init().catch((error) => {
+        console.error(error);
+        showToast('The app could not finish initialising local session storage.', 'error', 5200);
+      });
     })();
