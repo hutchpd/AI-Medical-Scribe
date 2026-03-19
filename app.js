@@ -510,8 +510,34 @@
         const parsed = normaliseWhitespace(session && session.summary) ? parseStructuredSummary(session.summary) : null;
         return headings.map((heading) => ({
           title: heading,
-          items: parsed && parsed[heading] && parsed[heading].length ? parsed[heading].slice() : ['Not stated']
+          items: normalizeFhirSectionItems(parsed && parsed[heading] && parsed[heading].length ? parsed[heading].slice() : [])
         }));
+      }
+
+      function normalizeFhirSectionItems(items) {
+        const normalizedItems = dedupeStrings(Array.isArray(items) ? items : [])
+          .map((item) => String(item || '').replace(/^[-*•]\s*/, '').trim())
+          .filter((item) => item && item.toLowerCase() !== 'not stated');
+        return normalizedItems.length ? normalizedItems : ['Not stated'];
+      }
+
+      function buildFhirNarrativeDivFromItems(items, title) {
+        const normalizedItems = normalizeFhirSectionItems(items);
+        return toFhirXhtmlDivFromPlainText(normalizedItems.map((item) => '- ' + item).join('\n'), title);
+      }
+
+      function getFhirCompositionSectionCode(title) {
+        const codeMap = {
+          Subjective: { system: 'http://loinc.org', code: '61150-9', display: 'Subjective narrative' },
+          Examination: { system: 'http://loinc.org', code: '29545-1', display: 'Physical findings' },
+          Assessment: { system: 'http://loinc.org', code: '51848-0', display: 'Assessment note' },
+          Plan: { system: 'http://loinc.org', code: '18776-5', display: 'Plan of care note' },
+          Transcript: { system: 'http://loinc.org', code: '11506-3', display: 'Progress note' },
+          'Manual Notes': { system: 'http://loinc.org', code: '34109-9', display: 'Note' },
+          'Generated Documents': { system: 'http://loinc.org', code: '55112-7', display: 'Document summary' }
+        };
+        const coding = codeMap[String(title || '').trim()];
+        return coding ? { coding: [coding], text: title } : { text: title || 'Section' };
       }
 
       function stripHtmlToPlainText(markup) {
@@ -536,16 +562,422 @@
         return value === undefined ? undefined : value;
       }
 
-      function buildSessionFhirBundle(session) {
-        if (!session) throw new Error('Session is required for FHIR export.');
+      function buildStructuredExtractionSource(session) {
+        return [String(session && session.summary || ''), String(session && session.manualNotes || '')]
+          .map((text) => text.replace(/\r/g, ''))
+          .filter((text) => normaliseWhitespace(text))
+          .join('\n');
+      }
 
+      function extractStructuredLinesByKeywords(sourceText, keywords) {
+        const source = String(sourceText || '');
+        if (!source) return [];
+        return dedupeStrings(source.split('\n')
+          .map((line) => String(line || '').trim())
+          .filter(Boolean)
+          .filter((line) => keywords.some((keyword) => new RegExp('\\b' + escapeRegExp(keyword) + '\\b', 'i').test(line)))
+          .map((line) => line.replace(/^[-*•]\s*/, '').trim()));
+      }
+
+      function extractFhirStructuredItems(session) {
+        const source = buildStructuredExtractionSource(session);
+        return {
+          problems: extractStructuredLinesByKeywords(source, ['diagnosis', 'diagnosed', 'problem', 'condition', 'assessment', 'impression', 'likely', 'consistent with']),
+          medications: extractStructuredLinesByKeywords(source, ['medication', 'medicine', 'tablet', 'capsule', 'dose', 'mg', 'mcg', 'ml', 'inhaler', 'insulin', 'prescribed', 'continue', 'cease', 'start']),
+          followUpActions: extractStructuredLinesByKeywords(source, ['follow-up', 'follow up', 'review', 'return', 'monitor', 'safety-net', 'safety net', 'recheck', 'recall']),
+          investigations: extractStructuredLinesByKeywords(source, ['test', 'investigation', 'scan', 'x-ray', 'xray', 'ultrasound', 'mri', 'ct', 'blood', 'pathology', 'ecg'])
+        };
+      }
+
+      function buildFhirPatient(context) {
+        if (!context.patientName) return null;
+        return {
+          fullUrl: context.patientFullUrl,
+          resource: {
+            resourceType: 'Patient',
+            id: context.patientResourceId,
+            name: [{ text: context.patientName }]
+          }
+        };
+      }
+
+      function buildFhirPractitioner(context) {
+        if (!context.clinicianName) return null;
+        return {
+          fullUrl: context.practitionerFullUrl,
+          resource: {
+            resourceType: 'Practitioner',
+            id: context.practitionerResourceId,
+            name: [{ text: context.clinicianName }]
+          }
+        };
+      }
+
+      function buildFhirOrganization(context) {
+        return {
+          fullUrl: context.organizationFullUrl,
+          resource: {
+            resourceType: 'Organization',
+            id: context.organizationResourceId,
+            name: context.organisationName
+          }
+        };
+      }
+
+      function buildFhirEncounter(context) {
+        return {
+          fullUrl: context.encounterFullUrl,
+          resource: simplifyFhirObject({
+            resourceType: 'Encounter',
+            id: context.encounterResourceId,
+            status: context.encounterStatus,
+            class: {
+              system: 'http://terminology.hl7.org/CodeSystem/v3-ActCode',
+              code: 'AMB',
+              display: 'ambulatory'
+            },
+            type: context.consultationType ? [{ text: context.consultationType }] : undefined,
+            subject: context.subjectReference ? { reference: context.subjectReference } : undefined,
+            participant: context.clinicianName ? [{ individual: { reference: context.practitionerFullUrl } }] : undefined,
+            period: simplifyFhirObject({
+              start: context.encounterStart,
+              end: context.encounterEnd
+            })
+          })
+        };
+      }
+
+      function buildFhirTranscriptDocumentReference(context) {
+        return {
+          fullUrl: context.transcriptDocFullUrl,
+          resource: simplifyFhirObject({
+            resourceType: 'DocumentReference',
+            id: context.transcriptDocResourceId,
+            status: 'current',
+            docStatus: context.docStatus,
+            type: { text: 'Consultation transcript' },
+            subject: context.subjectReference ? { reference: context.subjectReference } : undefined,
+            author: [{ reference: context.authorReference }],
+            date: context.compositionDate,
+            content: [{
+              attachment: {
+                contentType: 'text/plain; charset=utf-8',
+                language: FHIR_DOCUMENT_LANGUAGE,
+                title: 'Consultation transcript',
+                data: base64EncodeUtf8(context.transcriptText),
+                creation: context.compositionDate
+              }
+            }],
+            context: {
+              encounter: [{ reference: context.encounterFullUrl }]
+            }
+          })
+        };
+      }
+
+      function buildFhirManualNotesDocumentReference(context) {
+        return {
+          fullUrl: context.manualNotesDocFullUrl,
+          resource: simplifyFhirObject({
+            resourceType: 'DocumentReference',
+            id: context.manualNotesDocResourceId,
+            status: 'current',
+            docStatus: context.docStatus,
+            type: { text: 'Manual notes' },
+            subject: context.subjectReference ? { reference: context.subjectReference } : undefined,
+            author: [{ reference: context.authorReference }],
+            date: context.compositionDate,
+            content: [{
+              attachment: {
+                contentType: 'text/plain; charset=utf-8',
+                language: FHIR_DOCUMENT_LANGUAGE,
+                title: 'Manual notes',
+                data: base64EncodeUtf8(context.manualNotesText),
+                creation: context.compositionDate
+              }
+            }],
+            context: {
+              encounter: [{ reference: context.encounterFullUrl }]
+            }
+          })
+        };
+      }
+
+      function buildFhirGeneratedDocumentReferences(context) {
+        return context.generatedDocuments.map((documentItem) => {
+          const documentDate = toIsoInstant(documentItem.updatedAt || documentItem.createdAt || Date.now());
+          const resourceId = 'docref-generated-' + documentItem.id;
+          const fullUrl = 'urn:uuid:' + resourceId;
+          return {
+            fullUrl,
+            documentItem,
+            resource: simplifyFhirObject({
+              resourceType: 'DocumentReference',
+              id: resourceId,
+              status: 'current',
+              docStatus: context.docStatus,
+              type: { text: documentItem.templateName || 'Generated document' },
+              subject: context.subjectReference ? { reference: context.subjectReference } : undefined,
+              author: [{ reference: context.authorReference }],
+              date: documentDate,
+              content: [{
+                attachment: {
+                  contentType: 'text/html; charset=utf-8',
+                  language: FHIR_DOCUMENT_LANGUAGE,
+                  title: documentItem.title || documentItem.templateName || 'Generated document',
+                  data: base64EncodeUtf8(String(documentItem.content || '')),
+                  creation: documentDate
+                }
+              }],
+              context: {
+                encounter: [{ reference: context.encounterFullUrl }]
+              }
+            })
+          };
+        });
+      }
+
+      function buildFhirConditionResources(context) {
+        return context.structured.problems.map((problem, index) => {
+          const resourceId = 'condition-' + context.sessionId + '-' + String(index + 1);
+          return {
+            fullUrl: 'urn:uuid:' + resourceId,
+            resource: simplifyFhirObject({
+              resourceType: 'Condition',
+              id: resourceId,
+              clinicalStatus: {
+                coding: [{
+                  system: 'http://terminology.hl7.org/CodeSystem/condition-clinical',
+                  code: 'active',
+                  display: 'Active'
+                }]
+              },
+              verificationStatus: {
+                coding: [{
+                  system: 'http://terminology.hl7.org/CodeSystem/condition-ver-status',
+                  code: 'provisional',
+                  display: 'Provisional'
+                }]
+              },
+              code: { text: problem },
+              subject: context.subjectReference ? { reference: context.subjectReference } : undefined,
+              encounter: { reference: context.encounterFullUrl },
+              recordedDate: context.compositionDate
+            })
+          };
+        });
+      }
+
+      function buildFhirMedicationResources(context) {
+        return context.structured.medications.map((medication, index) => {
+          const resourceId = 'medicationstatement-' + context.sessionId + '-' + String(index + 1);
+          return {
+            fullUrl: 'urn:uuid:' + resourceId,
+            resource: simplifyFhirObject({
+              resourceType: 'MedicationStatement',
+              id: resourceId,
+              status: 'active',
+              medicationCodeableConcept: { text: medication },
+              subject: context.subjectReference ? { reference: context.subjectReference } : undefined,
+              context: { reference: context.encounterFullUrl },
+              effectiveDateTime: context.compositionDate,
+              note: [{ text: 'Heuristically extracted from summary or manual notes.' }]
+            })
+          };
+        });
+      }
+
+      function buildFhirServiceRequestResources(context) {
+        const requests = [];
+        context.structured.followUpActions.forEach((action, index) => {
+          const resourceId = 'servicerequest-followup-' + context.sessionId + '-' + String(index + 1);
+          requests.push({
+            fullUrl: 'urn:uuid:' + resourceId,
+            resource: simplifyFhirObject({
+              resourceType: 'ServiceRequest',
+              id: resourceId,
+              status: 'active',
+              intent: 'plan',
+              code: { text: action },
+              subject: context.subjectReference ? { reference: context.subjectReference } : undefined,
+              encounter: { reference: context.encounterFullUrl },
+              authoredOn: context.compositionDate,
+              note: [{ text: 'Heuristically extracted follow-up action.' }]
+            })
+          });
+        });
+        context.structured.investigations.forEach((item, index) => {
+          const resourceId = 'servicerequest-investigation-' + context.sessionId + '-' + String(index + 1);
+          requests.push({
+            fullUrl: 'urn:uuid:' + resourceId,
+            resource: simplifyFhirObject({
+              resourceType: 'ServiceRequest',
+              id: resourceId,
+              status: 'active',
+              intent: 'order',
+              code: { text: item },
+              subject: context.subjectReference ? { reference: context.subjectReference } : undefined,
+              encounter: { reference: context.encounterFullUrl },
+              authoredOn: context.compositionDate,
+              note: [{ text: 'Heuristically extracted investigation or test.' }]
+            })
+          });
+        });
+        return requests;
+      }
+
+      function buildFhirComposition(context) {
+        const soapSections = context.soapSections.map((section) => ({
+          title: section.title,
+          code: getFhirCompositionSectionCode(section.title),
+          text: {
+            status: 'generated',
+            div: buildFhirNarrativeDivFromItems(section.items, section.title)
+          }
+        }));
+
+        const manualNotesSection = {
+          title: 'Manual Notes',
+          code: getFhirCompositionSectionCode('Manual Notes'),
+          text: {
+            status: 'generated',
+            div: toFhirXhtmlDivFromPlainText(context.manualNotesText || 'No manual notes.', 'Manual Notes')
+          },
+          entry: [{ reference: context.manualNotesDocFullUrl }]
+        };
+
+        const transcriptSection = {
+          title: 'Transcript',
+          code: getFhirCompositionSectionCode('Transcript'),
+          text: {
+            status: 'generated',
+            div: toFhirXhtmlDivFromPlainText(context.transcriptText || 'No transcript recorded.', 'Transcript')
+          },
+          entry: [{ reference: context.transcriptDocFullUrl }]
+        };
+
+        const generatedDocumentsSection = {
+          title: 'Generated Documents',
+          code: getFhirCompositionSectionCode('Generated Documents'),
+          text: {
+            status: 'generated',
+            div: context.generatedDocumentReferences.length
+              ? toFhirXhtmlDivFromPlainText(context.generatedDocumentReferences.map((item) => '- ' + (item.documentItem.title || item.documentItem.templateName || 'Generated document')).join('\n'), 'Generated Documents')
+              : toFhirXhtmlDivFromPlainText('No generated documents.', 'Generated Documents')
+          },
+          entry: context.generatedDocumentReferences.length ? context.generatedDocumentReferences.map((item) => ({ reference: item.fullUrl })) : undefined
+        };
+
+        const structuredSections = [];
+        if (context.conditionResources.length) {
+          structuredSections.push({
+            title: 'Problems',
+            code: { coding: [{ system: 'http://loinc.org', code: '11450-4', display: 'Problem list' }], text: 'Problems' },
+            text: {
+              status: 'generated',
+              div: buildFhirNarrativeDivFromItems(context.structured.problems, 'Problems')
+            },
+            entry: context.conditionResources.map((entry) => ({ reference: entry.fullUrl }))
+          });
+        }
+        if (context.medicationResources.length) {
+          structuredSections.push({
+            title: 'Medications',
+            code: { coding: [{ system: 'http://loinc.org', code: '10160-0', display: 'History of medication use' }], text: 'Medications' },
+            text: {
+              status: 'generated',
+              div: buildFhirNarrativeDivFromItems(context.structured.medications, 'Medications')
+            },
+            entry: context.medicationResources.map((entry) => ({ reference: entry.fullUrl }))
+          });
+        }
+        if (context.serviceRequestResources.length) {
+          structuredSections.push({
+            title: 'Actions and Investigations',
+            code: { coding: [{ system: 'http://loinc.org', code: '18776-5', display: 'Plan of care note' }], text: 'Actions and Investigations' },
+            text: {
+              status: 'generated',
+              div: buildFhirNarrativeDivFromItems(context.structured.followUpActions.concat(context.structured.investigations), 'Actions and Investigations')
+            },
+            entry: context.serviceRequestResources.map((entry) => ({ reference: entry.fullUrl }))
+          });
+        }
+
+        return {
+          fullUrl: context.compositionFullUrl,
+          resource: simplifyFhirObject({
+            resourceType: 'Composition',
+            id: context.compositionResourceId,
+            status: context.compositionStatus,
+            type: deepClone(FHIR_COMPOSITION_TYPE),
+            subject: context.subjectReference ? { reference: context.subjectReference } : undefined,
+            encounter: { reference: context.encounterFullUrl },
+            date: context.compositionDate,
+            author: [{ reference: context.authorReference }],
+            title: context.consultationType + ' for ' + (context.patientName || 'Unnamed patient'),
+            custodian: { reference: context.organizationFullUrl },
+            section: soapSections.concat([manualNotesSection, transcriptSection, generatedDocumentsSection], structuredSections)
+          })
+        };
+      }
+
+      function buildFhirBundleEntries(context) {
+        const baseEntries = [
+          buildFhirComposition(context),
+          buildFhirPatient(context),
+          buildFhirPractitioner(context),
+          buildFhirOrganization(context),
+          buildFhirEncounter(context),
+          buildFhirTranscriptDocumentReference(context),
+          buildFhirManualNotesDocumentReference(context)
+        ].filter(Boolean);
+
+        return baseEntries
+          .concat(context.generatedDocumentReferences, context.conditionResources, context.medicationResources, context.serviceRequestResources)
+          .map((entry) => ({ fullUrl: entry.fullUrl, resource: simplifyFhirObject(entry.resource) }))
+          .filter((entry) => entry.resource);
+      }
+
+      function ensureFhirRequiredFields(bundle) {
+        if (!bundle || bundle.resourceType !== 'Bundle') throw new Error('FHIR export did not produce a Bundle resource.');
+        if (bundle.type !== 'document') throw new Error('FHIR Bundle type must be document.');
+        if (!bundle.entry || !bundle.entry.length) throw new Error('FHIR Bundle must contain at least one entry.');
+        const compositionEntry = bundle.entry[0];
+        if (!compositionEntry || !compositionEntry.resource || compositionEntry.resource.resourceType !== 'Composition') {
+          throw new Error('FHIR document Bundles must start with a Composition resource.');
+        }
+      }
+
+      function ensureFhirReferencesExist(bundle) {
+        const entryReferences = new Set((bundle.entry || []).map((entry) => entry && entry.fullUrl).filter(Boolean));
+        const missingReferences = new Set();
+
+        const collectReferences = (value) => {
+          if (!value) return;
+          if (Array.isArray(value)) {
+            value.forEach(collectReferences);
+            return;
+          }
+          if (typeof value !== 'object') return;
+          if (typeof value.reference === 'string' && /^urn:uuid:/i.test(value.reference) && !entryReferences.has(value.reference)) {
+            missingReferences.add(value.reference);
+          }
+          Object.keys(value).forEach((key) => collectReferences(value[key]));
+        };
+
+        bundle.entry.forEach((entry) => collectReferences(entry.resource));
+        if (missingReferences.size) throw new Error('FHIR export contains unresolved references: ' + Array.from(missingReferences).join(', '));
+      }
+
+      function createFhirExportContext(session) {
+        if (!session) throw new Error('Session is required for FHIR export.');
         const sessionId = String(session.id || uid('session'));
         const patientName = normaliseWhitespace(session.patientName || '');
         const clinicianName = normaliseWhitespace(session.clinicianName || '');
         const organisationName = normaliseWhitespace(state.customisation.organisationName || '') || 'Unknown organisation';
         const consultationType = normaliseWhitespace(session.consultationType || '') || 'Consultation';
         const transcriptText = buildTranscriptPlainText(session) || 'No transcript recorded.';
-        const manualNotes = String(session.manualNotes || '').trim() || 'No manual notes.';
+        const manualNotesText = String(session.manualNotes || '').trim() || 'No manual notes.';
         const compositionDate = toIsoInstant(session.updatedAt || session.stoppedAt || Date.now());
         const encounterStart = toIsoInstant(session.startedAt || session.createdAt || Date.now());
         const encounterEnd = session.stoppedAt ? toIsoInstant(session.stoppedAt) : undefined;
@@ -557,208 +989,90 @@
         };
         const docStatus = session.status === 'stopped' ? 'final' : 'preliminary';
         const compositionStatus = session.status === 'stopped' ? 'final' : 'preliminary';
-        const patientFullUrl = 'urn:uuid:patient-' + sessionId;
-        const practitionerFullUrl = 'urn:uuid:practitioner-' + sessionId;
-        const organizationFullUrl = 'urn:uuid:organization-' + sessionId;
-        const encounterFullUrl = 'urn:uuid:encounter-' + sessionId;
-        const transcriptDocFullUrl = 'urn:uuid:docref-transcript-' + sessionId;
-        const manualNotesDocFullUrl = 'urn:uuid:docref-manual-notes-' + sessionId;
-        const authorReference = clinicianName ? practitionerFullUrl : organizationFullUrl;
+        const patientResourceId = 'patient-' + sessionId;
+        const practitionerResourceId = 'practitioner-' + sessionId;
+        const organizationResourceId = 'organization-' + sessionId;
+        const encounterResourceId = 'encounter-' + sessionId;
+        const compositionResourceId = 'composition-' + sessionId;
+        const transcriptDocResourceId = 'docref-transcript-' + sessionId;
+        const manualNotesDocResourceId = 'docref-manual-notes-' + sessionId;
+        const patientFullUrl = 'urn:uuid:' + patientResourceId;
+        const practitionerFullUrl = 'urn:uuid:' + practitionerResourceId;
+        const organizationFullUrl = 'urn:uuid:' + organizationResourceId;
+        const encounterFullUrl = 'urn:uuid:' + encounterResourceId;
+        const compositionFullUrl = 'urn:uuid:' + compositionResourceId;
+        const transcriptDocFullUrl = 'urn:uuid:' + transcriptDocResourceId;
+        const manualNotesDocFullUrl = 'urn:uuid:' + manualNotesDocResourceId;
         const subjectReference = patientName ? patientFullUrl : undefined;
-        const generatedDocuments = Array.isArray(session.documents) ? session.documents : [];
-        const soapSections = buildSoapSectionsFromSession(session);
+        const authorReference = clinicianName ? practitionerFullUrl : organizationFullUrl;
+        const structured = extractFhirStructuredItems(session);
 
-        const organization = {
-          resourceType: 'Organization',
-          id: 'organization-' + sessionId,
-          name: organisationName
+        const context = {
+          sessionId,
+          patientName,
+          clinicianName,
+          organisationName,
+          consultationType,
+          transcriptText,
+          manualNotesText,
+          compositionDate,
+          encounterStart,
+          encounterEnd,
+          encounterStatus: encounterStatusMap[session.status] || 'planned',
+          docStatus,
+          compositionStatus,
+          patientResourceId,
+          practitionerResourceId,
+          organizationResourceId,
+          encounterResourceId,
+          compositionResourceId,
+          transcriptDocResourceId,
+          manualNotesDocResourceId,
+          patientFullUrl,
+          practitionerFullUrl,
+          organizationFullUrl,
+          encounterFullUrl,
+          compositionFullUrl,
+          transcriptDocFullUrl,
+          manualNotesDocFullUrl,
+          subjectReference,
+          authorReference,
+          generatedDocuments: Array.isArray(session.documents) ? session.documents.slice() : [],
+          soapSections: buildSoapSectionsFromSession(session),
+          structured
         };
 
-        const practitioner = clinicianName ? {
-          resourceType: 'Practitioner',
-          id: 'practitioner-' + sessionId,
-          name: [{ text: clinicianName }]
-        } : null;
+        context.generatedDocumentReferences = buildFhirGeneratedDocumentReferences(context);
+        context.conditionResources = buildFhirConditionResources(context);
+        context.medicationResources = buildFhirMedicationResources(context);
+        context.serviceRequestResources = buildFhirServiceRequestResources(context);
+        return context;
+      }
 
-        const patient = patientName ? {
-          resourceType: 'Patient',
-          id: 'patient-' + sessionId,
-          name: [{ text: patientName }]
-        } : null;
-
-        const encounter = simplifyFhirObject({
-          resourceType: 'Encounter',
-          id: 'encounter-' + sessionId,
-          status: encounterStatusMap[session.status] || 'planned',
-          class: {
-            system: 'http://terminology.hl7.org/CodeSystem/v3-ActCode',
-            code: 'AMB',
-            display: 'ambulatory'
-          },
-          type: consultationType ? [{ text: consultationType }] : undefined,
-          subject: subjectReference ? { reference: subjectReference } : undefined,
-          participant: clinicianName ? [{ individual: { reference: practitionerFullUrl } }] : undefined,
-          period: simplifyFhirObject({
-            start: encounterStart,
-            end: encounterEnd
-          })
-        });
-
-        const transcriptDocumentReference = simplifyFhirObject({
-          resourceType: 'DocumentReference',
-          id: 'docref-transcript-' + sessionId,
-          status: 'current',
-          docStatus,
-          type: { text: 'Consultation transcript' },
-          subject: subjectReference ? { reference: subjectReference } : undefined,
-          author: [{ reference: authorReference }],
-          date: compositionDate,
-          content: [{
-            attachment: {
-              contentType: 'text/plain; charset=utf-8',
-              language: FHIR_DOCUMENT_LANGUAGE,
-              title: 'Consultation transcript',
-              data: base64EncodeUtf8(transcriptText),
-              creation: compositionDate
-            }
-          }],
-          context: {
-            encounter: [{ reference: encounterFullUrl }]
-          }
-        });
-
-        const manualNotesDocumentReference = simplifyFhirObject({
-          resourceType: 'DocumentReference',
-          id: 'docref-manual-notes-' + sessionId,
-          status: 'current',
-          docStatus,
-          type: { text: 'Manual notes' },
-          subject: subjectReference ? { reference: subjectReference } : undefined,
-          author: [{ reference: authorReference }],
-          date: compositionDate,
-          content: [{
-            attachment: {
-              contentType: 'text/plain; charset=utf-8',
-              language: FHIR_DOCUMENT_LANGUAGE,
-              title: 'Manual notes',
-              data: base64EncodeUtf8(manualNotes),
-              creation: compositionDate
-            }
-          }],
-          context: {
-            encounter: [{ reference: encounterFullUrl }]
-          }
-        });
-
-        const generatedDocumentEntries = generatedDocuments.map((documentItem) => {
-          const fullUrl = 'urn:uuid:docref-generated-' + documentItem.id;
-          const documentDate = toIsoInstant(documentItem.updatedAt || documentItem.createdAt || Date.now());
-          const resource = simplifyFhirObject({
-            resourceType: 'DocumentReference',
-            id: 'docref-generated-' + documentItem.id,
-            status: 'current',
-            docStatus,
-            type: { text: documentItem.templateName || 'Generated document' },
-            subject: subjectReference ? { reference: subjectReference } : undefined,
-            author: [{ reference: authorReference }],
-            date: documentDate,
-            content: [{
-              attachment: {
-                contentType: 'text/html; charset=utf-8',
-                language: FHIR_DOCUMENT_LANGUAGE,
-                title: documentItem.title || documentItem.templateName || 'Generated document',
-                data: base64EncodeUtf8(String(documentItem.content || '')),
-                creation: documentDate
-              }
-            }],
-            context: {
-              encounter: [{ reference: encounterFullUrl }]
-            }
-          });
-          return { fullUrl, resource, documentItem };
-        });
-
-        const compositionSections = soapSections.map((section) => ({
-          title: section.title,
-          text: {
-            status: 'generated',
-            div: toFhirXhtmlDivFromPlainText(section.items.map((item) => '- ' + item).join('\n'))
-          }
-        }));
-
-        compositionSections.push({
-          title: 'Manual Notes',
-          text: {
-            status: 'generated',
-            div: toFhirXhtmlDivFromPlainText(manualNotes)
-          },
-          entry: [{ reference: manualNotesDocFullUrl }]
-        });
-
-        compositionSections.push({
-          title: 'Transcript',
-          text: {
-            status: 'generated',
-            div: toFhirXhtmlDivFromPlainText(transcriptText)
-          },
-          entry: [{ reference: transcriptDocFullUrl }]
-        });
-
-        compositionSections.push({
-          title: 'Generated Documents',
-          text: {
-            status: 'generated',
-            div: generatedDocumentEntries.length
-              ? toFhirXhtmlDivFromPlainText(generatedDocumentEntries.map((item) => '- ' + (item.documentItem.title || item.documentItem.templateName || 'Generated document')).join('\n'))
-              : toFhirXhtmlDivFromPlainText('No generated documents.')
-          },
-          entry: generatedDocumentEntries.length ? generatedDocumentEntries.map((item) => ({ reference: item.fullUrl })) : undefined
-        });
-
-        const composition = simplifyFhirObject({
-          resourceType: 'Composition',
-          id: 'composition-' + sessionId,
-          status: compositionStatus,
-          type: deepClone(FHIR_COMPOSITION_TYPE),
-          subject: subjectReference ? { reference: subjectReference } : undefined,
-          encounter: { reference: encounterFullUrl },
-          date: compositionDate,
-          author: [{ reference: authorReference }],
-          title: consultationType + ' for ' + (patientName || 'Unnamed patient'),
-          custodian: { reference: organizationFullUrl },
-          section: compositionSections
-        });
-
-        const entries = [
-          { fullUrl: 'urn:uuid:composition-' + sessionId, resource: composition },
-          patient ? { fullUrl: patientFullUrl, resource: patient } : null,
-          practitioner ? { fullUrl: practitionerFullUrl, resource: practitioner } : null,
-          { fullUrl: organizationFullUrl, resource: organization },
-          { fullUrl: encounterFullUrl, resource: encounter },
-          { fullUrl: transcriptDocFullUrl, resource: transcriptDocumentReference },
-          { fullUrl: manualNotesDocFullUrl, resource: manualNotesDocumentReference }
-        ].filter(Boolean);
-
-        generatedDocumentEntries.forEach((entry) => {
-          entries.push({ fullUrl: entry.fullUrl, resource: entry.resource });
-        });
-
-        return {
+      function buildSessionFhirBundle(session) {
+        const context = createFhirExportContext(session);
+        const bundle = simplifyFhirObject({
           resourceType: 'Bundle',
-          id: 'bundle-' + sessionId,
+          id: 'bundle-' + context.sessionId,
           identifier: {
             system: FHIR_BUNDLE_IDENTIFIER_SYSTEM,
-            value: sessionId
+            value: context.sessionId
           },
           type: 'document',
-          timestamp: compositionDate,
-          entry: entries
-        };
+          timestamp: context.compositionDate,
+          entry: buildFhirBundleEntries(context)
+        });
+
+        ensureFhirRequiredFields(bundle);
+        ensureFhirReferencesExist(bundle);
+        return bundle;
       }
 
       function downloadSessionFhir(session) {
         const bundle = buildSessionFhirBundle(session);
-        const filename = sanitizeFilenamePart(session.patientName || 'session') + '_' + (toLocalDateInputValue(session.startedAt || session.createdAt || Date.now()) || 'session') + '_fhir.json';
+        const sessionLabel = sanitizeFilenamePart(session.patientName || session.consultationType || 'session');
+        const isoLikeDate = String(toIsoInstant(session.startedAt || session.createdAt || Date.now())).slice(0, 10) || 'session';
+        const filename = sessionLabel + '_' + isoLikeDate + '_fhir.json';
         downloadTextFile(filename, JSON.stringify(bundle, null, 2), 'application/fhir+json;charset=utf-8');
       }
 
@@ -774,6 +1088,12 @@
           autoLockMinutes: 15,
           purgeOnBrowserClose: false,
           ephemeralConsultationMode: false,
+          fhirEndpointUrl: '',
+          fhirAuthType: 'none',
+          fhirBearerToken: '',
+          fhirCustomHeaderName: '',
+          fhirCustomHeaderValue: '',
+          fhirSendMode: 'bundle-json',
           autoSaveInterval: 5,
           theme: 'light',
           dataRetentionDays: 180,
@@ -843,6 +1163,9 @@
           summaryError: String(overrides.summaryError || ''),
           summaryPrompt: String(overrides.summaryPrompt || ''),
           summarySignature: String(overrides.summarySignature || ''),
+          lastFhirSentAt: typeof overrides.lastFhirSentAt === 'number' ? overrides.lastFhirSentAt : null,
+          lastFhirSentStatus: String(overrides.lastFhirSentStatus || ''),
+          lastFhirSentEndpoint: String(overrides.lastFhirSentEndpoint || ''),
           ephemeral: Boolean(overrides.ephemeral),
           documents: Array.isArray(overrides.documents) ? overrides.documents.map((documentItem) => createSessionDocument(documentItem)) : []
         };
@@ -916,6 +1239,12 @@
         merged.autoLockMinutes = clamp(Number(merged.autoLockMinutes) || 15, 0, 240);
         merged.purgeOnBrowserClose = Boolean(merged.purgeOnBrowserClose);
         merged.ephemeralConsultationMode = Boolean(merged.ephemeralConsultationMode);
+        merged.fhirEndpointUrl = String(merged.fhirEndpointUrl || '').trim();
+        merged.fhirAuthType = ['none', 'bearer', 'custom-header'].includes(merged.fhirAuthType) ? merged.fhirAuthType : 'none';
+        merged.fhirBearerToken = String(merged.fhirBearerToken || '');
+        merged.fhirCustomHeaderName = String(merged.fhirCustomHeaderName || '').trim();
+        merged.fhirCustomHeaderValue = String(merged.fhirCustomHeaderValue || '');
+        merged.fhirSendMode = merged.fhirSendMode === 'composition-only' ? 'composition-only' : 'bundle-json';
         merged.dataRetentionDays = Math.max(0, Number(merged.dataRetentionDays) || 0);
         merged.transcriptFontSize = clamp(Number(merged.transcriptFontSize) || 16, 14, 24);
         merged.transcriptLineSpacing = clamp(Number(merged.transcriptLineSpacing) || 1.55, 1.2, 2);
@@ -933,6 +1262,149 @@
         const settings = Object.assign({}, state.settings || {});
         delete settings.secureStorageUnlocked;
         return settings;
+      }
+
+      function isValidHttpUrl(value) {
+        try {
+          const url = new URL(String(value || '').trim());
+          return /^https?:$/i.test(url.protocol);
+        } catch (error) {
+          return false;
+        }
+      }
+
+      function hasConfiguredFhirEndpoint() {
+        return isValidHttpUrl(state.settings.fhirEndpointUrl);
+      }
+
+      function maskSecretForDisplay(value) {
+        const length = String(value || '').length;
+        if (!length) return 'Not set';
+        return 'Stored (' + String(length) + ' character' + (length === 1 ? '' : 's') + ')';
+      }
+
+      function getFhirEndpointStatusMessage() {
+        if (!state.integrationStatus.message) return '';
+        return state.integrationStatus.message;
+      }
+
+      function buildFhirRequestHeaders() {
+        const headers = {
+          'Content-Type': 'application/fhir+json',
+          Accept: 'application/fhir+json, application/json;q=0.9, */*;q=0.8'
+        };
+        if (state.settings.fhirAuthType === 'bearer' && state.settings.fhirBearerToken) {
+          headers.Authorization = 'Bearer ' + state.settings.fhirBearerToken;
+        }
+        if (state.settings.fhirAuthType === 'custom-header' && state.settings.fhirCustomHeaderName) {
+          headers[state.settings.fhirCustomHeaderName] = state.settings.fhirCustomHeaderValue || '';
+        }
+        return headers;
+      }
+
+      function updateSessionFhirSendAudit(session, status, endpointUrl) {
+        if (!session) return;
+        session.lastFhirSentAt = Date.now();
+        session.lastFhirSentStatus = String(status || '');
+        session.lastFhirSentEndpoint = String(endpointUrl || '');
+        session.updatedAt = Date.now();
+        upsertSession(session);
+      }
+
+      function getFhirSendPayload(session) {
+        const bundle = buildSessionFhirBundle(session);
+        return {
+          payload: state.settings.fhirSendMode === 'composition-only'
+            ? deepClone(bundle.entry[0] && bundle.entry[0].resource ? bundle.entry[0].resource : bundle)
+            : bundle,
+          bundle
+        };
+      }
+
+      async function fetchWithTimeout(url, options, timeoutMs = 12000) {
+        const controller = new AbortController();
+        const timerId = window.setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          return await fetch(url, Object.assign({}, options, { signal: controller.signal }));
+        } finally {
+          window.clearTimeout(timerId);
+        }
+      }
+
+      async function sendSessionFhir(session) {
+        if (!session) throw new Error('Select or open a session before sending FHIR.');
+        if (!hasConfiguredFhirEndpoint()) throw new Error('Configure a valid FHIR endpoint URL in Settings before sending.');
+
+        const endpointUrl = state.settings.fhirEndpointUrl.trim();
+        const request = getFhirSendPayload(session);
+        const headers = buildFhirRequestHeaders();
+
+        try {
+          const response = await fetchWithTimeout(endpointUrl, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(request.payload, null, 2)
+          });
+
+          if (!response.ok) {
+            updateSessionFhirSendAudit(session, 'failed (' + response.status + ')', endpointUrl);
+            await persistSessions();
+            throw new Error('Endpoint returned ' + response.status + ' ' + (response.statusText || 'response') + '.');
+          }
+
+          updateSessionFhirSendAudit(session, 'sent', endpointUrl);
+          await persistSessions();
+          renderConsultation();
+          renderHistory();
+          return { ok: true, status: response.status, mode: state.settings.fhirSendMode };
+        } catch (error) {
+          const message = error && error.name === 'AbortError'
+            ? 'Request timed out while sending to the configured FHIR endpoint.'
+            : normaliseWhitespace(error && error.message ? error.message : String(error || 'Unable to send FHIR.'));
+          updateSessionFhirSendAudit(session, 'failed', endpointUrl);
+          await persistSessions();
+          renderConsultation();
+          renderHistory();
+          throw new Error(message);
+        }
+      }
+
+      async function testFhirEndpointConnection() {
+        const endpointUrl = String(state.settings.fhirEndpointUrl || '').trim();
+        if (!isValidHttpUrl(endpointUrl)) {
+          state.integrationStatus = {
+            type: 'warning',
+            message: 'Enter a valid http or https endpoint URL before testing.'
+          };
+          renderSettingsForm();
+          return;
+        }
+
+        state.integrationStatus = {
+          type: 'info',
+          message: 'Testing endpoint reachability from this browser. Some FHIR servers may block cross-origin checks.'
+        };
+        renderSettingsForm();
+
+        try {
+          const response = await fetchWithTimeout(endpointUrl, {
+            method: 'OPTIONS',
+            headers: buildFhirRequestHeaders()
+          }, 8000);
+          state.integrationStatus = {
+            type: response.ok ? 'success' : 'warning',
+            message: response.ok
+              ? 'Endpoint responded to browser testing. This does not guarantee a later POST will be accepted.'
+              : 'Endpoint responded with ' + response.status + '. Browser reachability exists, but server acceptance may differ.'
+          };
+        } catch (error) {
+          state.integrationStatus = {
+            type: 'warning',
+            message: 'Browser testing could not confirm the endpoint. URL format is valid, but the server may block OPTIONS, CORS, or cross-origin browser requests.'
+          };
+        }
+
+        renderSettingsForm();
       }
 
       function saveSettings() {
@@ -1434,6 +1906,10 @@
         historySelectedAssetId: 'summary',
         selectedDocumentId: null,
         documentGenerationRequest: null,
+        integrationStatus: {
+          type: 'info',
+          message: ''
+        },
         showSplash: false,
         showApiHelpModal: false,
         capabilityCheckToken: null,
@@ -1511,6 +1987,7 @@
         copyTranscriptBtn: $('copyTranscriptBtn'),
         exportTranscriptBtn: $('exportTranscriptBtn'),
         downloadFhirBtn: $('downloadFhirBtn'),
+        sendFhirBtn: $('sendFhirBtn'),
         startBtn: $('startBtn'),
         stopBtn: $('stopBtn'),
         pauseBtn: $('pauseBtn'),
@@ -1534,6 +2011,7 @@
         historyEditToggle: $('historyEditToggle'),
         historySaveBtn: $('historySaveBtn'),
         historyDownloadFhirBtn: $('historyDownloadFhirBtn'),
+        historySendFhirBtn: $('historySendFhirBtn'),
         historyDetailHint: $('historyDetailHint'),
         settingLocale: $('settingLocale'),
         settingAutoPunctuation: $('settingAutoPunctuation'),
@@ -1562,6 +2040,19 @@
         settingSummaryPrompt: $('settingSummaryPrompt'),
         settingSummaryAvailability: $('settingSummaryAvailability'),
         settingsSecurityMessage: $('settingsSecurityMessage'),
+        settingFhirEndpointUrl: $('settingFhirEndpointUrl'),
+        settingFhirSendMode: $('settingFhirSendMode'),
+        settingFhirAuthType: $('settingFhirAuthType'),
+        settingFhirBearerTokenRow: $('settingFhirBearerTokenRow'),
+        settingFhirBearerToken: $('settingFhirBearerToken'),
+        settingFhirBearerTokenStatus: $('settingFhirBearerTokenStatus'),
+        settingFhirCustomHeaderNameRow: $('settingFhirCustomHeaderNameRow'),
+        settingFhirCustomHeaderName: $('settingFhirCustomHeaderName'),
+        settingFhirCustomHeaderValueRow: $('settingFhirCustomHeaderValueRow'),
+        settingFhirCustomHeaderValue: $('settingFhirCustomHeaderValue'),
+        settingFhirCustomHeaderValueStatus: $('settingFhirCustomHeaderValueStatus'),
+        testFhirEndpointBtn: $('testFhirEndpointBtn'),
+        fhirEndpointStatusMessage: $('fhirEndpointStatusMessage'),
         documentsTemplateSelect: $('documentsTemplateSelect'),
         documentsGenerateBtn: $('documentsGenerateBtn'),
         documentsList: $('documentsList'),
@@ -3063,6 +3554,7 @@
         renderConsultationSummaryLabel();
         refreshControlStates();
         refs.downloadFhirBtn.disabled = isSessionUiLocked() || !state.activeSession;
+        refs.sendFhirBtn.disabled = isSessionUiLocked() || !state.activeSession || !hasConfiguredFhirEndpoint();
       }
 
       function renderMacroBar() {
@@ -3352,6 +3844,7 @@
           refs.historyEditToggle.disabled = true;
           refs.historySaveBtn.disabled = true;
           refs.historyDownloadFhirBtn.disabled = true;
+          refs.historySendFhirBtn.disabled = true;
           refs.historyDetailHint.textContent = 'Unlock the app to review transcript, notes, metadata, and documents.';
           refs.historyEditToggle.textContent = 'Edit Mode';
           refs.historyDetail.innerHTML = '<div class="empty-state">' + escapeHtml(getSessionLockPlaceholderText('session details')) + '</div>';
@@ -3361,6 +3854,7 @@
         refs.historyEditToggle.disabled = !session;
         refs.historySaveBtn.disabled = !session;
         refs.historyDownloadFhirBtn.disabled = !session;
+        refs.historySendFhirBtn.disabled = !session || !hasConfiguredFhirEndpoint();
         refs.historyDetailHint.textContent = session ? 'Review transcript, notes, metadata, and tags for the selected session.' : 'Select a session to review transcript and notes.';
         refs.historyEditToggle.textContent = state.historyEditMode ? 'Read Mode' : 'Edit Mode';
         if (!session) {
@@ -3451,6 +3945,17 @@
         refs.settingLineSpacing.value = String(state.settings.transcriptLineSpacing);
         refs.settingLineSpacingValue.textContent = Number(state.settings.transcriptLineSpacing).toFixed(2);
         refs.settingSummaryPrompt.value = getSummaryPromptValue();
+        refs.settingFhirEndpointUrl.value = state.settings.fhirEndpointUrl;
+        refs.settingFhirSendMode.value = state.settings.fhirSendMode;
+        refs.settingFhirAuthType.value = state.settings.fhirAuthType;
+        refs.settingFhirBearerToken.value = state.settings.fhirBearerToken;
+        refs.settingFhirCustomHeaderName.value = state.settings.fhirCustomHeaderName;
+        refs.settingFhirCustomHeaderValue.value = state.settings.fhirCustomHeaderValue;
+        refs.settingFhirBearerTokenRow.classList.toggle('hidden', state.settings.fhirAuthType !== 'bearer');
+        refs.settingFhirCustomHeaderNameRow.classList.toggle('hidden', state.settings.fhirAuthType !== 'custom-header');
+        refs.settingFhirCustomHeaderValueRow.classList.toggle('hidden', state.settings.fhirAuthType !== 'custom-header');
+        refs.settingFhirBearerTokenStatus.textContent = maskSecretForDisplay(state.settings.fhirBearerToken);
+        refs.settingFhirCustomHeaderValueStatus.textContent = maskSecretForDisplay(state.settings.fhirCustomHeaderValue);
         refs.settingSummaryAvailability.textContent = hasAiSummarySupport()
           ? (hasPromptApiSupport()
             ? 'Prompt API is available through the browser. Summaries run on-device with no API key.'
@@ -3466,6 +3971,7 @@
         refs.openSecureStorageModalBtn.disabled = (!canPromptForSecureStoragePassphrase() && !isSessionUiLocked()) || (!state.settings.secureStorageEnabled && !hasLockedSessionEnvelope());
         refs.lockSecureStorageBtn.disabled = !state.settings.secureStorageEnabled || isSessionUiLocked();
         renderSupportBanner(refs.settingsSecurityMessage, getSecureStorageWarningMessage());
+        renderSupportBanner(refs.fhirEndpointStatusMessage, getFhirEndpointStatusMessage());
         renderSecureStorageModal();
       }
 
@@ -3993,6 +4499,18 @@
             showToast('FHIR export failed.', 'error');
           }
         });
+        refs.sendFhirBtn.addEventListener('click', async () => {
+          if (!state.activeSession) {
+            showToast('There is no active session to send.', 'warning');
+            return;
+          }
+          try {
+            const result = await sendSessionFhir(state.activeSession);
+            showToast('FHIR sent to the configured endpoint as ' + (result.mode === 'composition-only' ? 'Composition JSON.' : 'Bundle JSON.'), 'success', 3200);
+          } catch (error) {
+            showToast(normaliseWhitespace(error && error.message ? error.message : 'FHIR send failed.'), 'error', 4200);
+          }
+        });
         refs.historyDownloadFhirBtn.addEventListener('click', () => {
           const session = getSelectedHistorySession();
           if (!session) return;
@@ -4001,6 +4519,16 @@
             showToast('FHIR document downloaded.', 'success');
           } catch (error) {
             showToast('FHIR export failed.', 'error');
+          }
+        });
+        refs.historySendFhirBtn.addEventListener('click', async () => {
+          const session = getSelectedHistorySession();
+          if (!session) return;
+          try {
+            const result = await sendSessionFhir(session);
+            showToast('FHIR sent to the configured endpoint as ' + (result.mode === 'composition-only' ? 'Composition JSON.' : 'Bundle JSON.'), 'success', 3200);
+          } catch (error) {
+            showToast(normaliseWhitespace(error && error.message ? error.message : 'FHIR send failed.'), 'error', 4200);
           }
         });
         refs.macroBar.addEventListener('click', (event) => {
@@ -4083,6 +4611,36 @@
           state.settings.summaryPrompt = String(refs.settingSummaryPrompt.value || '').trim() || createDefaultSummaryPrompt();
           saveSettings();
         }, 180));
+        refs.settingFhirEndpointUrl.addEventListener('input', debounce(() => {
+          state.settings.fhirEndpointUrl = String(refs.settingFhirEndpointUrl.value || '').trim();
+          state.integrationStatus.message = '';
+          saveSettings();
+          renderSettingsForm();
+          renderConsultationChrome();
+          renderHistoryDetail();
+        }, 180));
+        refs.settingFhirSendMode.addEventListener('change', () => { state.settings.fhirSendMode = refs.settingFhirSendMode.value === 'composition-only' ? 'composition-only' : 'bundle-json'; applySettingsChange(); });
+        refs.settingFhirAuthType.addEventListener('change', () => {
+          state.settings.fhirAuthType = ['none', 'bearer', 'custom-header'].includes(refs.settingFhirAuthType.value) ? refs.settingFhirAuthType.value : 'none';
+          state.integrationStatus.message = '';
+          applySettingsChange();
+        });
+        refs.settingFhirBearerToken.addEventListener('input', debounce(() => {
+          state.settings.fhirBearerToken = String(refs.settingFhirBearerToken.value || '');
+          saveSettings();
+          renderSettingsForm();
+        }, 180));
+        refs.settingFhirCustomHeaderName.addEventListener('input', debounce(() => {
+          state.settings.fhirCustomHeaderName = String(refs.settingFhirCustomHeaderName.value || '').trim();
+          saveSettings();
+          renderSettingsForm();
+        }, 180));
+        refs.settingFhirCustomHeaderValue.addEventListener('input', debounce(() => {
+          state.settings.fhirCustomHeaderValue = String(refs.settingFhirCustomHeaderValue.value || '');
+          saveSettings();
+          renderSettingsForm();
+        }, 180));
+        refs.testFhirEndpointBtn.addEventListener('click', async () => { await testFhirEndpointConnection(); });
         refs.customOrgName.addEventListener('input', () => { state.customisation.organisationName = normaliseWhitespace(refs.customOrgName.value) || 'Organisation'; saveCustomisation(); applyThemeAndBranding(); renderConsultation(); });
         refs.customBrandColor.addEventListener('input', () => { state.customisation.brandingColor = refs.customBrandColor.value; saveCustomisation(); applyThemeAndBranding(); renderConsultation(); });
         refs.customDefaultConsultationType.addEventListener('input', () => {

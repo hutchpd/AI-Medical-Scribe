@@ -2,7 +2,7 @@
 
 ![Demo](demo.gif)
 
-AI Medical Scribe is a browser-based prototype for live consultation transcription, on-device summarisation, document drafting, and client-side FHIR export.
+AI Medical Scribe is a browser-based prototype for live consultation transcription, on-device summarisation, document drafting, structured client-side FHIR export, and optional direct browser-based FHIR delivery to a configured endpoint.
 
 It is designed as a local-first front end. Session capture, notes, summaries, generated documents, FHIR exports, settings, and customisation are all handled in the browser with no project backend.
 
@@ -13,7 +13,7 @@ Most AI medical scribes rely on cloud processing and external APIs.
 This project explores a different approach:
 - no backend
 - no API keys
-- no data leaving the device
+- no data leaving the device by default
 
 ## Features
 
@@ -22,7 +22,8 @@ This project explores a different approach:
 - Important-moment markers inside the transcript timeline.
 - On-device AI summary generation after transcription stops.
 - Rich text document drafting from transcript content using configurable templates.
-- Client-side FHIR R4 Bundle export for the active session or a selected history session.
+- Client-side FHIR R4 document Bundle export for the active session or a selected history session, with structured Composition sections and optional clinical resources.
+- Optional direct browser-side POST of FHIR export payloads to a configured endpoint, with download-based export still available.
 - Session history with review, edit, duplicate, archive, and delete workflows.
 - Optional encrypted session storage at rest using the browser Web Crypto API.
 - App-level lock and unlock controls with inactivity auto-lock for sensitive session content.
@@ -171,19 +172,25 @@ Document drafts are generated from the transcript using Chrome's on-device model
 
 ### FHIR Export
 
-Sessions can be exported as a FHIR R4 JSON Bundle directly in the browser.
+Sessions can be exported as a FHIR R4 JSON document Bundle directly in the browser, or sent from the browser to a configured FHIR endpoint.
 
 What that means in practice:
 
 - The app can package a consultation into a structured healthcare data document rather than only plain text or HTML.
-- The export is built on demand from the current in-browser session object and downloaded as a `.json` file.
-- No backend is used and the generated FHIR is not stored separately in local storage.
+- The export is built on demand from the current in-browser session object and can either be downloaded as a `.json` file or POSTed directly to a user-configured endpoint.
+- No project backend is used and the generated FHIR is not stored separately in local storage.
 - The Bundle is document-style and includes a `Composition` as the first entry, plus the related `Encounter`, `Organization`, optional `Patient` and `Practitioner`, and `DocumentReference` resources for transcript, manual notes, and generated documents.
-- Clinical summary content is currently exported as narrative XHTML sections rather than deeply coded clinical resources. That makes it useful for interoperability experiments, testing, and downstream mapping, but it is still a prototype export rather than a production clinical integration.
+- `Composition` sections are now structured around SOAP-style narrative content, making the export more readable and easier to extend.
+- Lightweight structured extraction heuristics can also add optional `Condition`, `MedicationStatement`, and `ServiceRequest` resources when the transcript or notes contain recognisable problem, medication, investigation, or follow-up content.
+- Internal validation checks run before export so missing required fields or broken intra-bundle references are caught before download or send.
+- Endpoint delivery is optional and user-triggered. The app supports plain POST, bearer-token auth, or custom-header auth, plus a simple endpoint test action from Settings.
+- Some endpoints may reject direct browser requests because of CORS or server policy. In those cases, download-based export still works.
 
 ### Storage
 
 Sessions, notes, settings, customisation, summaries, and generated documents are handled in-browser only. By default, local data is stored in browser local storage. FHIR exports are generated on demand for download and are not persisted by the app unless the user chooses to keep the downloaded file.
+
+If direct FHIR delivery is configured, endpoint details are also stored in local browser settings. The current prototype masks credentials in the UI, but does not yet encrypt settings storage.
 
 The app now also supports optional local privacy protections for session data:
 
@@ -203,6 +210,8 @@ Additional notes:
 - Saved session history can optionally be encrypted before it is written to local storage.
 - Sensitive consultation content can be hidden behind an in-app lock screen while the tab remains open.
 - Local deletion and retention controls are user-driven and happen in the browser only.
+- If you configure an external FHIR endpoint and click Send FHIR, the selected export payload is sent directly from your browser to that endpoint.
+- Endpoint credentials configured for direct send are currently stored in browser settings storage and masked in the UI, but not yet protected by the encrypted session-history storage flow.
 - The initial built-in model download is managed by Chrome, not by this app.
 - Speech transcription uses the browser's speech recognition engine. If you need a stricter privacy statement for transcription itself, verify the behaviour of that browser feature in your target deployment environment before making broader claims.
 
@@ -228,6 +237,13 @@ Additional notes:
 - Check that Prompt API is available in the current Chrome build.
 - Review DevTools for availability or permission-related errors.
 
+### Send FHIR fails
+
+- Confirm a valid HTTP or HTTPS endpoint URL is configured in Settings.
+- If authentication is required, verify the selected auth mode and credential value.
+- Some servers do not allow direct browser-originated requests. Check for CORS or preflight failures in DevTools.
+- If the endpoint rejects the payload, try Download FHIR first and inspect the JSON manually.
+
 ### Speech recognition does not start
 
 - This prototype currently depends on Chrome speech recognition support.
@@ -238,7 +254,7 @@ Additional notes:
 - Frontend: HTML + JavaScript
 - Transcription: Browser speech recognition
 - AI: Chrome built-in Prompt API (on-device Gemini Nano)
-- Interoperability export: Client-side FHIR R4 JSON Bundle generation
+- Interoperability export: Client-side FHIR R4 document Bundle generation with optional browser-side endpoint POST
 - Storage: Browser local storage
 
 ## Roadmap

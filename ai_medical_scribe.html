@@ -241,6 +241,7 @@
                 <button class="btn small" id="copyTranscriptBtn" type="button">Copy Transcript</button>
                 <button class="btn small" id="exportTranscriptBtn" type="button">Export .txt</button>
                 <button class="btn small" id="downloadFhirBtn" type="button">Download FHIR</button>
+                <button class="btn small" id="sendFhirBtn" type="button">Send FHIR</button>
               </div>
             </div>
 
@@ -343,6 +344,7 @@
               </div>
               <div class="inline-actions">
                 <button class="btn small" id="historyDownloadFhirBtn" type="button">Download FHIR</button>
+                <button class="btn small" id="historySendFhirBtn" type="button">Send FHIR</button>
                 <button class="btn small" id="historyEditToggle" type="button">Edit Mode</button>
                 <button class="btn small" id="historySaveBtn" type="button">Save Changes</button>
               </div>
@@ -577,6 +579,53 @@
                 <textarea id="settingSummaryPrompt" class="textarea" rows="7" placeholder="Enter the default consultation summary prompt..."></textarea>
                 <div class="subtle-note" id="settingSummaryAvailability">Uses Gemini Nano through the browser when available. No API key is required.</div>
               </div>
+            </div>
+          </div>
+
+          <div class="card settings-card">
+            <div class="setting-group">
+              <h3>Integration</h3>
+              <div class="setting-row">
+                <label class="label" for="settingFhirEndpointUrl">FHIR endpoint URL</label>
+                <input id="settingFhirEndpointUrl" type="url" placeholder="https://example.test/fhir" />
+                <div class="subtle-note">Optional. Download-based FHIR export continues to work even if this is left blank.</div>
+              </div>
+              <div class="setting-row">
+                <label class="label" for="settingFhirSendMode">Send mode</label>
+                <select id="settingFhirSendMode">
+                  <option value="bundle-json">Bundle JSON</option>
+                  <option value="composition-only">Composition only</option>
+                </select>
+              </div>
+              <div class="setting-row">
+                <label class="label" for="settingFhirAuthType">Authentication</label>
+                <select id="settingFhirAuthType">
+                  <option value="none">None</option>
+                  <option value="bearer">Bearer token</option>
+                  <option value="custom-header">Custom header</option>
+                </select>
+              </div>
+              <div class="setting-row hidden" id="settingFhirBearerTokenRow">
+                <label class="label" for="settingFhirBearerToken">Bearer token</label>
+                <input id="settingFhirBearerToken" type="password" placeholder="Enter bearer token" autocomplete="off" />
+                <div class="subtle-note" id="settingFhirBearerTokenStatus">Stored in browser settings. Masked in the UI.</div>
+              </div>
+              <div class="setting-row hidden" id="settingFhirCustomHeaderNameRow">
+                <label class="label" for="settingFhirCustomHeaderName">Custom header name</label>
+                <input id="settingFhirCustomHeaderName" type="text" placeholder="e.g. X-API-Key" autocomplete="off" />
+              </div>
+              <div class="setting-row hidden" id="settingFhirCustomHeaderValueRow">
+                <label class="label" for="settingFhirCustomHeaderValue">Custom header value</label>
+                <input id="settingFhirCustomHeaderValue" type="password" placeholder="Enter header value" autocomplete="off" />
+                <div class="subtle-note" id="settingFhirCustomHeaderValueStatus">Stored in browser settings. Masked in the UI.</div>
+              </div>
+              <div class="setting-row">
+                <div class="subtle-note">Credentials entered here remain in browser storage unless secure storage is later extended to settings as well.</div>
+              </div>
+              <div class="inline-actions">
+                <button class="btn small" id="testFhirEndpointBtn" type="button">Test endpoint</button>
+              </div>
+              <div class="support-banner" id="fhirEndpointStatusMessage" role="alert"></div>
             </div>
           </div>
         </div>
