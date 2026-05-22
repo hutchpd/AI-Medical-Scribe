@@ -9,6 +9,10 @@
         customisation: 'ai_medical_scribe_customisation_v1'
       };
 
+      const HTML_NAMESPACE = 'http://www.w3.org/1999/xhtml';
+      const ALLOWED_DOCUMENT_TAGS = new Set(['A', 'B', 'BLOCKQUOTE', 'BR', 'DIV', 'EM', 'H1', 'H2', 'H3', 'H4', 'HR', 'I', 'LI', 'OL', 'P', 'SPAN', 'STRONG', 'TABLE', 'TBODY', 'TD', 'TH', 'THEAD', 'TR', 'U', 'UL']);
+      const STRIP_CONTENT_TAGS = new Set(['BASE', 'EMBED', 'FORM', 'FRAME', 'FRAMESET', 'HEAD', 'IFRAME', 'INPUT', 'LINK', 'META', 'NOSCRIPT', 'OBJECT', 'SCRIPT', 'STYLE', 'TEMPLATE']);
+
       const FHIR_BUNDLE_IDENTIFIER_SYSTEM = 'urn:findonsoftware:ai-medical-scribe:bundle';
       const FHIR_DOCUMENT_LANGUAGE = 'en-GB';
       const SESSION_STORAGE_ENVELOPE_VERSION = 2;
@@ -1515,12 +1519,12 @@
           autoPunctuation: true,
           interimResults: true,
           saveRawTranscript: true,
-          secureStorageEnabled: false,
+          secureStorageEnabled: true,
           secureStorageMode: 'passphrase',
           secureStorageUnlocked: false,
           autoLockMinutes: 15,
           purgeOnBrowserClose: false,
-          ephemeralConsultationMode: false,
+          ephemeralConsultationMode: true,
           fhirEndpointUrl: '',
           fhirAuthType: 'none',
           fhirBearerToken: '',
@@ -1677,6 +1681,12 @@
 
       function loadSettings() {
         const saved = readStorage(STORAGE_KEYS.settings, {});
+        if (saved && typeof saved === 'object' && (saved.fhirBearerToken || saved.fhirCustomHeaderValue)) {
+          const sanitizedSaved = Object.assign({}, saved);
+          delete sanitizedSaved.fhirBearerToken;
+          delete sanitizedSaved.fhirCustomHeaderValue;
+          writeStorage(STORAGE_KEYS.settings, sanitizedSaved);
+        }
         const merged = Object.assign(createDefaultSettings(), saved || {});
         merged.autoSaveInterval = clamp(Number(merged.autoSaveInterval) || 5, 1, 30);
         merged.secureStorageEnabled = Boolean(merged.secureStorageEnabled);
@@ -1687,9 +1697,9 @@
         merged.ephemeralConsultationMode = Boolean(merged.ephemeralConsultationMode);
         merged.fhirEndpointUrl = String(merged.fhirEndpointUrl || '').trim();
         merged.fhirAuthType = ['none', 'bearer', 'custom-header'].includes(merged.fhirAuthType) ? merged.fhirAuthType : 'none';
-        merged.fhirBearerToken = String(merged.fhirBearerToken || '');
+        merged.fhirBearerToken = '';
         merged.fhirCustomHeaderName = String(merged.fhirCustomHeaderName || '').trim();
-        merged.fhirCustomHeaderValue = String(merged.fhirCustomHeaderValue || '');
+        merged.fhirCustomHeaderValue = '';
         merged.fhirSendMode = merged.fhirSendMode === 'composition-only' ? 'composition-only' : 'bundle-json';
         merged.dataRetentionDays = Math.max(0, Number(merged.dataRetentionDays) || 0);
         merged.transcriptFontSize = clamp(Number(merged.transcriptFontSize) || 16, 14, 24);
@@ -1707,7 +1717,75 @@
       function getPersistableSettings() {
         const settings = Object.assign({}, state.settings || {});
         delete settings.secureStorageUnlocked;
+        delete settings.fhirBearerToken;
+        delete settings.fhirCustomHeaderValue;
         return settings;
+      }
+
+      function getSafeDocumentHref(value) {
+        const rawValue = String(value || '').trim();
+        if (!rawValue) return '';
+        if (/[\u0000-\u001f\u007f]/.test(rawValue)) return '';
+        try {
+          const resolved = new URL(rawValue, window.location.href);
+          if (!/^(https?:|mailto:|tel:)$/i.test(resolved.protocol)) return '';
+          return resolved.protocol === 'http:' || resolved.protocol === 'https:' ? resolved.href : rawValue;
+        } catch (error) {
+          return '';
+        }
+      }
+
+      function getSanitizedTableSpanAttribute(value) {
+        const numericValue = Number(value);
+        if (!Number.isInteger(numericValue)) return '';
+        return String(clamp(numericValue, 1, 12));
+      }
+
+      function isValidHttpHeaderName(value) {
+        return /^[!#$%&'*+.^_`|~0-9a-z-]+$/i.test(String(value || '').trim());
+      }
+
+      function getFhirCredentialStorageMessage() {
+        const authType = state.settings.fhirAuthType;
+        if (authType === 'none') return 'FHIR authentication is disabled.';
+        const hasSecret = authType === 'bearer'
+          ? Boolean(state.settings.fhirBearerToken)
+          : Boolean(state.settings.fhirCustomHeaderValue);
+        return hasSecret
+          ? 'FHIR authentication secrets stay in memory only for this tab and are cleared on refresh.'
+          : 'FHIR authentication secrets are not persisted. Enter them again after refresh when needed.';
+      }
+
+      function isEmbeddedInFrame() {
+        try {
+          return window.self !== window.top;
+        } catch (error) {
+          return true;
+        }
+      }
+
+      function getFhirConfigurationError() {
+        if (!hasConfiguredFhirEndpoint()) return 'Configure a valid FHIR endpoint URL in Settings before sending.';
+        if (isEmbeddedInFrame()) return 'FHIR send is disabled while the app is embedded in another page.';
+        if (state.settings.fhirAuthType === 'bearer' && !normaliseWhitespace(state.settings.fhirBearerToken)) {
+          return 'Enter a bearer token for this tab before sending to the configured FHIR endpoint.';
+        }
+        if (state.settings.fhirAuthType === 'custom-header') {
+          if (!isValidHttpHeaderName(state.settings.fhirCustomHeaderName)) return 'Enter a valid custom header name before sending to the configured FHIR endpoint.';
+          if (!normaliseWhitespace(state.settings.fhirCustomHeaderValue)) return 'Enter a custom header value for this tab before sending to the configured FHIR endpoint.';
+        }
+        return '';
+      }
+
+      function describeSpeechRecognitionError(code) {
+        const normalizedCode = String(code || 'unknown');
+        if (normalizedCode === 'aborted') return 'Speech recognition stopped before a result was returned.';
+        if (normalizedCode === 'audio-capture') return 'No working microphone was detected. Check the active recording device for this browser.';
+        if (normalizedCode === 'network') return 'Speech recognition lost connectivity. Stop and restart the session after the browser connection recovers.';
+        if (normalizedCode === 'no-speech') return 'No speech was detected. Check the microphone and try speaking again.';
+        if (normalizedCode === 'not-allowed') return 'Microphone access was blocked for this page. Allow microphone access in the browser and try again.';
+        if (normalizedCode === 'service-not-allowed') return 'The browser denied access to its speech recognition service for this page.';
+        return 'Speech recognition failed with code: ' + normalizedCode + '.';
       }
 
       function isValidHttpUrl(value) {
@@ -1726,11 +1804,11 @@
       function maskSecretForDisplay(value) {
         const length = String(value || '').length;
         if (!length) return 'Not set';
-        return 'Stored (' + String(length) + ' character' + (length === 1 ? '' : 's') + ')';
+        return 'In memory (' + String(length) + ' character' + (length === 1 ? '' : 's') + ')';
       }
 
       function getFhirEndpointStatusMessage() {
-        if (!state.integrationStatus.message) return '';
+        if (!state.integrationStatus.message) return getFhirConfigurationError();
         return state.integrationStatus.message;
       }
 
@@ -1742,7 +1820,7 @@
         if (state.settings.fhirAuthType === 'bearer' && state.settings.fhirBearerToken) {
           headers.Authorization = 'Bearer ' + state.settings.fhirBearerToken;
         }
-        if (state.settings.fhirAuthType === 'custom-header' && state.settings.fhirCustomHeaderName) {
+        if (state.settings.fhirAuthType === 'custom-header' && isValidHttpHeaderName(state.settings.fhirCustomHeaderName)) {
           headers[state.settings.fhirCustomHeaderName] = state.settings.fhirCustomHeaderValue || '';
         }
         return headers;
@@ -1779,7 +1857,8 @@
 
       async function sendSessionFhir(session) {
         if (!session) throw new Error('Select or open a session before sending FHIR.');
-        if (!hasConfiguredFhirEndpoint()) throw new Error('Configure a valid FHIR endpoint URL in Settings before sending.');
+        const configurationError = getFhirConfigurationError();
+        if (configurationError) throw new Error(configurationError);
 
         const endpointUrl = state.settings.fhirEndpointUrl.trim();
         const request = getFhirSendPayload(session);
@@ -1820,6 +1899,15 @@
 
       async function testFhirEndpointConnection() {
         const endpointUrl = String(state.settings.fhirEndpointUrl || '').trim();
+        const configurationError = getFhirConfigurationError();
+        if (configurationError && configurationError !== 'Enter a bearer token for this tab before sending to the configured FHIR endpoint.' && configurationError !== 'Enter a custom header value for this tab before sending to the configured FHIR endpoint.') {
+          state.integrationStatus = {
+            type: 'warning',
+            message: configurationError
+          };
+          renderSettingsForm();
+          return;
+        }
         if (!isValidHttpUrl(endpointUrl)) {
           state.integrationStatus = {
             type: 'warning',
@@ -3842,35 +3930,48 @@
       }
 
       function sanitizeRichTextMarkup(markup) {
-        const allowedTags = new Set(['A', 'B', 'BLOCKQUOTE', 'BR', 'DIV', 'EM', 'H1', 'H2', 'H3', 'H4', 'HR', 'I', 'LI', 'OL', 'P', 'SPAN', 'STRONG', 'TABLE', 'TBODY', 'TD', 'TH', 'THEAD', 'TR', 'U', 'UL']);
-        const template = document.createElement('template');
-        template.innerHTML = String(markup || '');
+        const parser = new window.DOMParser();
+        const parsed = parser.parseFromString(String(markup || ''), 'text/html');
 
         const sanitizeNode = (node) => {
           if (node.nodeType === Node.TEXT_NODE) return document.createTextNode(node.textContent || '');
           if (node.nodeType !== Node.ELEMENT_NODE) return document.createDocumentFragment();
+          if (node.namespaceURI !== HTML_NAMESPACE) return document.createDocumentFragment();
 
-          if (!allowedTags.has(node.tagName)) {
+          const tagName = String(node.tagName || '').toUpperCase();
+          if (STRIP_CONTENT_TAGS.has(tagName)) return document.createDocumentFragment();
+
+          if (!ALLOWED_DOCUMENT_TAGS.has(tagName)) {
             const fragment = document.createDocumentFragment();
             Array.from(node.childNodes).forEach((childNode) => fragment.appendChild(sanitizeNode(childNode)));
             return fragment;
           }
 
-          const element = document.createElement(node.tagName.toLowerCase());
-          if (node.tagName === 'A') {
-            const href = String(node.getAttribute('href') || '');
-            if (/^(https?:|mailto:|tel:)/i.test(href)) {
+          const element = document.createElement(tagName.toLowerCase());
+          if (tagName === 'A') {
+            const href = getSafeDocumentHref(node.getAttribute('href'));
+            if (href) {
               element.setAttribute('href', href);
               element.setAttribute('target', '_blank');
               element.setAttribute('rel', 'noopener noreferrer');
             }
+          }
+          if (tagName === 'TH') {
+            const scope = String(node.getAttribute('scope') || '').toLowerCase();
+            if (scope === 'row' || scope === 'col') element.setAttribute('scope', scope);
+          }
+          if (tagName === 'TD' || tagName === 'TH') {
+            const colspan = getSanitizedTableSpanAttribute(node.getAttribute('colspan'));
+            const rowspan = getSanitizedTableSpanAttribute(node.getAttribute('rowspan'));
+            if (colspan) element.setAttribute('colspan', colspan);
+            if (rowspan) element.setAttribute('rowspan', rowspan);
           }
           Array.from(node.childNodes).forEach((childNode) => element.appendChild(sanitizeNode(childNode)));
           return element;
         };
 
         const output = document.createElement('div');
-        Array.from(template.content.childNodes).forEach((childNode) => output.appendChild(sanitizeNode(childNode)));
+        Array.from(parsed.body.childNodes).forEach((childNode) => output.appendChild(sanitizeNode(childNode)));
         return output.innerHTML.trim();
       }
 
@@ -4328,8 +4429,11 @@
         if (state.activeSession && isEphemeralSession(state.activeSession)) {
           return 'This consultation is in ephemeral mode. It stays in memory for this tab only unless you choose to save it to local storage.';
         }
+        if (state.settings.secureStorageEnabled && !state.secureStorage.unlocked && state.settings.secureStorageMode === 'passphrase') {
+          return 'Saved consultation history is protected by encrypted local storage, but this tab is still locked. Enter the secure-storage passphrase before saving identifiable session data.';
+        }
         if (state.settings.ephemeralConsultationMode) {
-          return 'New consultations start in ephemeral mode and are not written to local storage unless you explicitly save them.';
+          return 'New consultations start in ephemeral mode and are kept in memory only until you explicitly save them into encrypted local history.';
         }
         if (state.settings.purgeOnBrowserClose) {
           return 'Saved consultation history will be purged from this browser when the tab is closed, if the browser allows unload cleanup.';
@@ -4440,7 +4544,7 @@
         renderConsultationSummaryLabel();
         refreshControlStates();
         refs.downloadFhirBtn.disabled = isSessionUiLocked() || !state.activeSession;
-        refs.sendFhirBtn.disabled = isSessionUiLocked() || !state.activeSession || !hasConfiguredFhirEndpoint();
+        refs.sendFhirBtn.disabled = isSessionUiLocked() || !state.activeSession || Boolean(getFhirConfigurationError());
       }
 
       function renderMacroBar() {
@@ -4837,7 +4941,7 @@
         refs.historyEditToggle.disabled = !session;
         refs.historySaveBtn.disabled = !session;
         refs.historyDownloadFhirBtn.disabled = !session;
-        refs.historySendFhirBtn.disabled = !session || !hasConfiguredFhirEndpoint();
+        refs.historySendFhirBtn.disabled = !session || Boolean(getFhirConfigurationError());
         refs.historyDetailHint.textContent = session ? 'Review transcript, notes, metadata, and tags for the selected session.' : 'Select a session to review transcript and notes.';
         refs.historyEditToggle.textContent = state.historyEditMode ? 'Read Mode' : 'Edit Mode';
         if (!session) {
@@ -4943,6 +5047,8 @@
         refs.settingFhirCustomHeaderValueRow.classList.toggle('hidden', state.settings.fhirAuthType !== 'custom-header');
         refs.settingFhirBearerTokenStatus.textContent = maskSecretForDisplay(state.settings.fhirBearerToken);
         refs.settingFhirCustomHeaderValueStatus.textContent = maskSecretForDisplay(state.settings.fhirCustomHeaderValue);
+        refs.settingFhirBearerTokenStatus.title = getFhirCredentialStorageMessage();
+        refs.settingFhirCustomHeaderValueStatus.title = getFhirCredentialStorageMessage();
         refs.settingSummaryAvailability.textContent = hasAiSummarySupport()
           ? (hasPromptApiSupport()
             ? 'Prompt API is available through the browser. Summaries run on-device with no API key.'
@@ -5214,14 +5320,10 @@
         if (code === 'aborted' || code === 'no-speech') return;
         if (session && (code === 'not-allowed' || code === 'service-not-allowed')) transitionSessionStatus(session, 'stopped', { skipPersist: true });
         else if (session && (code === 'audio-capture' || code === 'network')) transitionSessionStatus(session, 'paused', { skipPersist: true });
-        const messageMap = {
-          'not-allowed': 'Microphone access was blocked. Allow microphone access in the browser and try again.',
-          'service-not-allowed': 'Speech recognition service access was blocked by the browser.',
-          'audio-capture': 'No microphone input was found. Check the selected device and permissions.',
-          'network': 'Speech recognition was interrupted. The session remains available.',
-          'language-not-supported': 'The selected speech locale is not supported in this browser.'
-        };
-        showToast(messageMap[code] || ('Speech recognition error: ' + code + '.'), code === 'network' ? 'warning' : 'error', 4200);
+        const message = code === 'network'
+          ? 'Speech recognition was interrupted. ' + describeSpeechRecognitionError(code)
+          : describeSpeechRecognitionError(code);
+        showToast(message, code === 'network' ? 'warning' : 'error', 4200);
         persistSessions();
       }
 
@@ -5310,6 +5412,12 @@
           session.ephemeral = false;
           session.updatedAt = Date.now();
           upsertSession(session);
+        }
+        if (state.settings.secureStorageEnabled && state.settings.secureStorageMode === 'passphrase' && !state.secureStorage.unlocked) {
+          openSecureStorageModal();
+          if (showFeedback) showToast('Unlock secure local storage before saving this consultation to encrypted history.', 'info', 3200);
+          renderConsultation();
+          return;
         }
         const didPersist = await persistSessions();
         renderConsultation();
@@ -5684,21 +5792,26 @@
         refs.settingFhirSendMode.addEventListener('change', () => { state.settings.fhirSendMode = refs.settingFhirSendMode.value === 'composition-only' ? 'composition-only' : 'bundle-json'; applySettingsChange(); });
         refs.settingFhirAuthType.addEventListener('change', () => {
           state.settings.fhirAuthType = ['none', 'bearer', 'custom-header'].includes(refs.settingFhirAuthType.value) ? refs.settingFhirAuthType.value : 'none';
+          if (state.settings.fhirAuthType !== 'bearer') state.settings.fhirBearerToken = '';
+          if (state.settings.fhirAuthType !== 'custom-header') state.settings.fhirCustomHeaderValue = '';
           state.integrationStatus.message = '';
           applySettingsChange();
         });
         refs.settingFhirBearerToken.addEventListener('input', debounce(() => {
           state.settings.fhirBearerToken = String(refs.settingFhirBearerToken.value || '');
+          state.integrationStatus.message = '';
           saveSettings();
           renderSettingsForm();
         }, 180));
         refs.settingFhirCustomHeaderName.addEventListener('input', debounce(() => {
           state.settings.fhirCustomHeaderName = String(refs.settingFhirCustomHeaderName.value || '').trim();
+          state.integrationStatus.message = '';
           saveSettings();
           renderSettingsForm();
         }, 180));
         refs.settingFhirCustomHeaderValue.addEventListener('input', debounce(() => {
           state.settings.fhirCustomHeaderValue = String(refs.settingFhirCustomHeaderValue.value || '');
+          state.integrationStatus.message = '';
           saveSettings();
           renderSettingsForm();
         }, 180));

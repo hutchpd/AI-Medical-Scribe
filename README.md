@@ -29,11 +29,11 @@ This project explores a different approach:
 - Client-side FHIR R4 document Bundle export for the active session or a selected history session, with structured Composition sections and optional clinical resources.
 - Optional direct browser-side POST of FHIR export payloads to a configured endpoint, with download-based export still available.
 - Session history with review, edit, duplicate, archive, and delete workflows.
-- Optional encrypted session storage at rest using the browser Web Crypto API.
+- Encrypted session storage at rest using the browser Web Crypto API, enabled by default.
 - App-level lock and unlock controls with inactivity auto-lock for sensitive session content.
 - Explicit privacy controls for retention, purge-on-close, ephemeral consultations, and destructive local deletion.
 - Local customisation for organisation name, colour, snippets, tags, and document templates.
-- Local persistence through browser storage.
+- Ephemeral-by-default consultation capture, with explicit save into encrypted browser storage.
 
 ## Requirements
 
@@ -243,7 +243,7 @@ Sessions, notes, settings, customisation, summaries, and generated documents are
 
 Session records now also include a local append-only audit event history used for in-app traceability views and optional local export.
 
-If direct FHIR delivery is configured, endpoint details are also stored in local browser settings. The current prototype masks credentials in the UI, but does not yet encrypt settings storage.
+If direct FHIR delivery is configured, the endpoint URL and non-secret integration settings are stored locally, but bearer tokens and custom header values remain in memory only for the current tab and are cleared on refresh.
 
 The app now also supports optional local privacy protections for session data:
 
@@ -251,20 +251,34 @@ The app now also supports optional local privacy protections for session data:
 - Passphrase unlock mode, which allows encrypted history to be reopened after refresh.
 - Session-only key mode, which keeps the key in memory only and makes encrypted history unavailable after refresh.
 - App-level lock and unlock behaviour, including automatic locking after inactivity.
-- Ephemeral consultation mode for memory-only sessions until the user explicitly saves them.
+- Ephemeral consultation mode for memory-only sessions until the user explicitly saves them. New consultations start in this mode by default.
 - Retention-based cleanup, delete archived sessions, delete all sessions, and best-effort purge on browser close.
 
 ## Privacy
 
 This app does not send transcript, summary, document, or FHIR export data to any backend controlled by this project. AI summaries and document generation use Chrome's on-device model and do not rely on external AI services.
+
+Saved history is encrypted by default, and new consultations begin in ephemeral in-memory mode until you explicitly save them. FHIR authentication secrets are intentionally kept in memory only for the current tab and are not written to browser local storage.
+
+## Manual Regression Checklist
+
+Use this checklist after touching storage, document generation, or FHIR integration code.
+
+1. Start a new consultation and confirm it begins in ephemeral mode with a privacy message explaining that it stays in memory until explicitly saved.
+2. Attempt to save a consultation before unlocking secure local storage and confirm the app prompts for the passphrase instead of silently writing plaintext history.
+3. Unlock secure local storage, save a consultation, refresh the app, and confirm encrypted history stays locked until the correct passphrase is entered.
+4. Generate a document containing hostile markup samples such as `javascript:` links, inline event handlers, unsupported tags, and SVG payloads, then confirm the preview strips executable or unsupported content.
+5. Configure bearer-token or custom-header FHIR auth, refresh the app, and confirm the secret fields are blank while the endpoint URL and other non-secret settings remain.
+6. Test FHIR send failure paths for invalid endpoint URL, missing token/header value, embedded-frame blocking, timeout, and non-2xx responses, then confirm the UI shows actionable errors.
+7. Exercise microphone denial, missing audio device, and network interruption scenarios, then confirm the session state pauses or stops cleanly and the user sees a specific recovery message.
 Additional notes:
 
-- Session data is stored locally in the browser.
-- Saved session history can optionally be encrypted before it is written to local storage.
+- Session data is handled locally in the browser.
+- Saved session history is encrypted before it is written to local storage.
 - Sensitive consultation content can be hidden behind an in-app lock screen while the tab remains open.
 - Local deletion and retention controls are user-driven and happen in the browser only.
 - If you configure an external FHIR endpoint and click Send FHIR, the selected export payload is sent directly from your browser to that endpoint.
-- Endpoint credentials configured for direct send are currently stored in browser settings storage and masked in the UI, but not yet protected by the encrypted session-history storage flow.
+- Endpoint credentials configured for direct send are kept in memory only for the current tab and are not written to browser local storage.
 - The initial built-in model download is managed by Chrome, not by this app.
 - Speech transcription uses the browser's speech recognition engine. If you need a stricter privacy statement for transcription itself, verify the behaviour of that browser feature in your target deployment environment before making broader claims.
 

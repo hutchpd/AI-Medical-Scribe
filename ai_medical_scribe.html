@@ -43,7 +43,7 @@
         </div>
 
         <div class="splash-footer">
-          <p class="subtle-note">If browser AI is not ready yet, you can still use manual notes, session history, and local editing while Chrome downloads or enables the required model support.</p>
+          <p class="subtle-note">New consultations now start in ephemeral mode and saved history uses encrypted local storage by default. If browser AI is not ready yet, you can still use manual notes, session history, and local editing while Chrome downloads or enables the required model support.</p>
           <div class="inline-actions">
             <button class="btn" id="refreshSplashStatusBtn" type="button">Refresh checks</button>
             <button class="btn primary" id="continueFromSplashBtn" type="button">Continue to app</button>
@@ -205,7 +205,7 @@
                 <button class="btn small" id="generateSummaryBtn" type="button">Generate Summary</button>
               </div>
             </div>
-            <div class="summary-output" id="consultationSummary"></div>
+            <div class="summary-output" id="consultationSummary" aria-live="polite"></div>
           </div>
 
           <div class="card summary-card hidden" id="documentGenerationCard">
@@ -420,7 +420,7 @@
                 <button class="btn small" id="downloadDocumentBtn" type="button">Download HTML</button>
               </div>
             </div>
-            <div class="document-preview" id="documentPreview"></div>
+            <div class="document-preview" id="documentPreview" aria-live="polite"></div>
           </div>
         </div>
       </section>
@@ -430,7 +430,7 @@
           <div>
             <p class="eyebrow">System settings</p>
             <h2>Recognition, retention, and transcript display preferences</h2>
-            <p>Changes are applied immediately and stored in local storage.</p>
+            <p>Changes are applied immediately in this browser. Authentication secrets remain in memory only for the current tab.</p>
           </div>
         </div>
 
@@ -483,7 +483,7 @@
                   <span>Encrypt saved session history at rest</span>
                   <label class="switch"><input id="settingSecureStorageEnabled" type="checkbox" /><span class="slider"></span></label>
                 </div>
-                <div class="subtle-note">When enabled, transcripts, notes, summaries, and generated documents are encrypted before they are stored locally.</div>
+                <div class="subtle-note">Enabled by default. Transcripts, notes, summaries, and generated documents are encrypted before they are stored locally.</div>
               </div>
               <div class="setting-row">
                 <label class="label" for="settingSecureStorageMode">Unlock mode</label>
@@ -549,7 +549,7 @@
                   <span>Ephemeral consultation mode</span>
                   <label class="switch"><input id="settingEphemeralConsultationMode" type="checkbox" /><span class="slider"></span></label>
                 </div>
-                <div class="subtle-note">New consultations stay in memory only until you explicitly convert them to a saved session.</div>
+                <div class="subtle-note">Enabled by default. New consultations stay in memory only until you explicitly convert them to a saved session.</div>
               </div>
               <div class="inline-actions">
                 <button class="btn small" id="purgeOldSessionsNowBtn" type="button">Delete sessions older than retention cutoff now</button>
@@ -634,7 +634,7 @@
               <div class="setting-row hidden" id="settingFhirBearerTokenRow">
                 <label class="label" for="settingFhirBearerToken">Bearer token</label>
                 <input id="settingFhirBearerToken" type="password" placeholder="Enter bearer token" autocomplete="off" />
-                <div class="subtle-note" id="settingFhirBearerTokenStatus">Stored in browser settings. Masked in the UI.</div>
+                <div class="subtle-note" id="settingFhirBearerTokenStatus">Kept in memory for this tab only. Masked in the UI.</div>
               </div>
               <div class="setting-row hidden" id="settingFhirCustomHeaderNameRow">
                 <label class="label" for="settingFhirCustomHeaderName">Custom header name</label>
@@ -643,10 +643,10 @@
               <div class="setting-row hidden" id="settingFhirCustomHeaderValueRow">
                 <label class="label" for="settingFhirCustomHeaderValue">Custom header value</label>
                 <input id="settingFhirCustomHeaderValue" type="password" placeholder="Enter header value" autocomplete="off" />
-                <div class="subtle-note" id="settingFhirCustomHeaderValueStatus">Stored in browser settings. Masked in the UI.</div>
+                <div class="subtle-note" id="settingFhirCustomHeaderValueStatus">Kept in memory for this tab only. Masked in the UI.</div>
               </div>
               <div class="setting-row">
-                <div class="subtle-note">Credentials entered here remain in browser storage unless secure storage is later extended to settings as well.</div>
+                <div class="subtle-note">Credentials entered here are never written to browser local storage. Re-enter them after refresh when needed.</div>
               </div>
               <div class="inline-actions">
                 <button class="btn small" id="testFhirEndpointBtn" type="button">Test endpoint</button>
